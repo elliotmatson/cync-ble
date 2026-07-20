@@ -293,10 +293,8 @@ class CyncMeshClient:
 
             # Ask all devices to report their current state so HA lights
             # immediately reflect reality rather than showing stale defaults.
-            try:
-                await self.request_status()
-            except Exception:
-                pass  # not fatal — state will populate on next real notification
+            # Non-blocking — see request_status_nowait.
+            self.request_status_nowait()
 
             return True
 
@@ -376,14 +374,23 @@ class CyncMeshClient:
                 except Exception as err:
                     _LOGGER.error("Status callback error: %s", err)
 
-    async def send_packet(self, target: int, command: int, data: list[int]) -> bool:
+    async def send_packet(
+        self, target: int, command: int, data: list[int], *, allow_reconnect: bool = True
+    ) -> bool:
         """Encrypt and send a Telink Mesh packet to a device in the mesh.
 
-        If the connection is stale, reconnects once and retries.
+        If the connection is stale, reconnects once and retries — unless
+        allow_reconnect is False, in which case a write failure is just
+        reported back to the caller. That's used for passive status polling:
+        a single missed poll write (proxy hiccup, etc.) shouldn't tear down
+        an otherwise-healthy connection or trigger a reconnect. Only a real
+        BLE disconnect (via _on_disconnected) or a failed user-issued command
+        should do that.
         """
-        for attempt in range(2):
+        attempts = 2 if allow_reconnect else 1
+        for attempt in range(attempts):
             if not self.is_connected:
-                if not await self.connect():
+                if not allow_reconnect or not await self.connect():
                     return False
 
             async with self._lock:
@@ -409,8 +416,9 @@ class CyncMeshClient:
                     return True
                 except Exception as err:
                     _LOGGER.warning("send_packet failed (attempt %d): %s", attempt + 1, err)
-                    self._connected = False
-                    # loop will retry after reconnecting
+                    if allow_reconnect:
+                        self._connected = False
+                    # loop will retry after reconnecting (if allowed)
 
         return False
 
@@ -422,9 +430,24 @@ class CyncMeshClient:
         power) simply won't produce a notification, which is how per-device
         availability gets derived (the mesh protocol has no explicit
         online/offline event; cync2mqtt uses this same poll-and-check
-        pattern).
+        pattern). allow_reconnect=False: see send_packet.
         """
-        return await self.send_packet(0xFFFF, CMD_STATUS_RESPONSE, [0x10])
+        return await self.send_packet(0xFFFF, CMD_STATUS_RESPONSE, [0x10], allow_reconnect=False)
+
+    def request_status_nowait(self) -> None:
+        """Fire request_status() in the background without blocking the caller.
+
+        Used right after connecting (so a slow proxy write can't delay
+        connect() itself) and by the coordinator's periodic poll (so one
+        slow mesh can't stall the whole update cycle).
+        """
+        self._hass.async_create_task(self._safe_request_status())
+
+    async def _safe_request_status(self) -> None:
+        try:
+            await self.request_status()
+        except Exception as err:
+            _LOGGER.debug("Status poll failed: %s", err)
 
     # ------------------------------------------------------------------
     # High-level device commands
