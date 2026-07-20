@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections import namedtuple
 from typing import Callable, Optional, Any
 
@@ -40,6 +41,8 @@ from .const import (
     CMD_RGB_SUBCMD,
     CMD_STATUS_RESPONSE,
     BLE_TIMEOUT,
+    MAC_FAIL_THRESHOLD,
+    MAC_COOLDOWN_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -142,6 +145,12 @@ class CyncMeshClient:
         self._lock = asyncio.Lock()
         self._connecting = False  # guard against concurrent connect attempts
 
+        # Per-MAC connect-failure tracking, so one persistently bad node
+        # (e.g. stuck with a stale GATT cache) can't block reconnection to
+        # the rest of the mesh — see _connect_to_mac / _mac_in_cooldown.
+        self._mac_fail_counts: dict[str, int] = {}
+        self._mac_cooldown_until: dict[str, float] = {}
+
     @property
     def is_connected(self) -> bool:
         return self._connected and self._sk is not None
@@ -161,16 +170,49 @@ class CyncMeshClient:
             if preferred_mac:
                 # Use the device we just saw advertising — single targeted attempt
                 mac = self._normalize_mac(preferred_mac)
+                if self._mac_in_cooldown(mac):
+                    _LOGGER.debug(
+                        "Skipping %s — in cooldown after repeated connect failures", mac
+                    )
+                    return False
                 _LOGGER.debug("Connecting to mesh '%s' via recently-seen %s", self._mesh_name, mac)
                 return await self._connect_to_mac(mac)
             else:
                 _LOGGER.debug("Trying to connect to mesh '%s'", self._mesh_name)
-                for mac in self._mesh_macs:
+                # Try healthy MACs first so one stuck node doesn't eat the whole
+                # cycle before we ever reach a bulb that would actually connect.
+                # If every MAC is in cooldown, fall back to the full list rather
+                # than refusing to reconnect at all.
+                candidates = [m for m in self._mesh_macs if not self._mac_in_cooldown(m)]
+                if not candidates:
+                    candidates = list(self._mesh_macs)
+                for mac in candidates:
                     if await self._connect_to_mac(mac):
                         return True
                 return False
         finally:
             self._connecting = False
+
+    def _mac_in_cooldown(self, mac: str) -> bool:
+        mac = self._normalize_mac(mac)
+        until = self._mac_cooldown_until.get(mac)
+        return until is not None and time.monotonic() < until
+
+    def _record_mac_failure(self, mac: str) -> None:
+        mac = self._normalize_mac(mac)
+        count = self._mac_fail_counts.get(mac, 0) + 1
+        self._mac_fail_counts[mac] = count
+        if count >= MAC_FAIL_THRESHOLD:
+            self._mac_cooldown_until[mac] = time.monotonic() + MAC_COOLDOWN_SECONDS
+            _LOGGER.debug(
+                "MAC %s failed %d times in a row — cooling down for %ds",
+                mac, count, MAC_COOLDOWN_SECONDS,
+            )
+
+    def _record_mac_success(self, mac: str) -> None:
+        mac = self._normalize_mac(mac)
+        self._mac_fail_counts.pop(mac, None)
+        self._mac_cooldown_until.pop(mac, None)
 
     @staticmethod
     def _normalize_mac(mac: str) -> str:
@@ -190,6 +232,10 @@ class CyncMeshClient:
                 return False
 
             from bleak import BleakClient
+            # After a prior failure on this MAC, force fresh GATT service
+            # discovery — a stale cached service table (missing a CCCD, etc.)
+            # is a common cause of repeated connect failures on one node.
+            use_cache = self._mac_fail_counts.get(mac, 0) == 0
             # establish_connection handles retries and properly routes through
             # ESPHome BLE proxies (requires active: true on the proxy)
             client = await establish_connection(
@@ -198,8 +244,10 @@ class CyncMeshClient:
                 mac,
                 max_attempts=3,
                 disconnected_callback=self._on_disconnected,
+                use_services_cache=use_cache,
             )
             if not client.is_connected:
+                self._record_mac_failure(mac)
                 return False
 
             self._client = client
@@ -225,6 +273,7 @@ class CyncMeshClient:
                     mac, len(data2),
                 )
                 await client.disconnect()
+                self._record_mac_failure(mac)
                 return False
             self._sk = _generate_sk(
                 self._mesh_name, self._mesh_password,
@@ -239,12 +288,13 @@ class CyncMeshClient:
             await client.read_gatt_char(CYNC_NOTIFY_CHAR)
 
             self._connected = True
+            self._record_mac_success(mac)
             _LOGGER.info("Connected to Cync mesh via %s", mac)
 
             # Ask all devices to report their current state so HA lights
             # immediately reflect reality rather than showing stale defaults.
             try:
-                await self.send_packet(0xFFFF, CMD_STATUS_RESPONSE, [0x10])
+                await self.request_status()
             except Exception:
                 pass  # not fatal — state will populate on next real notification
 
@@ -254,6 +304,7 @@ class CyncMeshClient:
             _LOGGER.warning("Failed to connect to %s: %s", mac, err)
             self._sk = None
             self._connected = False
+            self._record_mac_failure(mac)
             if self._client:
                 try:
                     await self._client.disconnect()
@@ -362,6 +413,18 @@ class CyncMeshClient:
                     # loop will retry after reconnecting
 
         return False
+
+    async def request_status(self) -> bool:
+        """Broadcast a status request so every device in the mesh reports in.
+
+        Called once right after connecting, and periodically by the
+        coordinator thereafter — a device that stops answering (e.g. it lost
+        power) simply won't produce a notification, which is how per-device
+        availability gets derived (the mesh protocol has no explicit
+        online/offline event; cync2mqtt uses this same poll-and-check
+        pattern).
+        """
+        return await self.send_packet(0xFFFF, CMD_STATUS_RESPONSE, [0x10])
 
     # ------------------------------------------------------------------
     # High-level device commands

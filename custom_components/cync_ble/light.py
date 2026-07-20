@@ -75,7 +75,7 @@ class CyncBLELight(LightEntity):
 
     @property
     def available(self) -> bool:
-        return self._device.is_connected
+        return self._device.is_available
 
     @property
     def is_on(self) -> bool:
