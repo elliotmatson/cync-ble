@@ -1,0 +1,45 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Cync BLE Setup",
+        "description": "Connect your Cync account to get started with BLE mesh bulbs.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        },
+        "data_description": {
+          "email": "Your Cync account email",
+          "password": "Your Cync account password"
+        }
+      },
+      "otp": {
+        "title": "Check Your Email",
+        "description": "A one-time code was sent to {email}. Enter it below.",
+        "data": {
+          "otp": "One-time code"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password",
+      "cannot_connect": "Failed to connect to Cync cloud",
+      "no_devices_found": "No Cync devices found in your account",
+      "device_not_found": "Selected device not found",
+      "unknown": "An unexpected error occurred"
+    },
+    "abort": {
+      "no_devices_found": "No Cync devices found in your account. Please ensure you have Cync bulbs added to your account.",
+      "user_cancelled": "Setup cancelled",
+      "device_not_found": "Selected device could not be found",
+      "invalid_source": "Invalid setup source"
+    }
+  },
+  "entity": {
+    "light": {
+      "cync_ble": {
+        "name": "Cync BLE Light"
+      }
+    }
+  }
+}
