@@ -349,11 +349,11 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                     self._mesh_was_connected[mesh_name] = True
                 # Re-poll so per-device availability reflects devices that
                 # have actually gone quiet (e.g. powered off), not just
-                # whether the shared mesh connection is still open.
-                try:
-                    await client.request_status()
-                except Exception as err:
-                    _LOGGER.debug("Status poll failed for mesh %s: %s", mesh_name, err)
+                # whether the shared mesh connection is still open. Fired in
+                # the background — a slow/failed poll write must not stall
+                # this update cycle or tear down an otherwise-healthy mesh
+                # connection (see CyncMeshClient.request_status_nowait).
+                client.request_status_nowait()
         return self._devices
 
     # ------------------------------------------------------------------
