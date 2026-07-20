@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Optional
@@ -16,7 +17,14 @@ from homeassistant.components.bluetooth import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, POLL_INTERVAL, MIN_COLOR_TEMP, MAX_COLOR_TEMP, MAX_CONCURRENT_CONNECTIONS
+from .const import (
+    DOMAIN,
+    POLL_INTERVAL,
+    MIN_COLOR_TEMP,
+    MAX_COLOR_TEMP,
+    MAX_CONCURRENT_CONNECTIONS,
+    DEVICE_OFFLINE_TIMEOUT,
+)
 from .cync_mesh import CyncMeshClient, DeviceStatus
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,6 +70,12 @@ class CyncBLEDevice:
         self._color_temp_k: int = 4000    # Kelvin
         self._rgb: Optional[tuple[int, int, int]] = None
 
+        # Monotonic timestamp of the last status notification actually
+        # received for THIS device (as opposed to just the shared mesh GATT
+        # connection being up). None until the first one arrives — mirrors
+        # cync2mqtt seeding every device "offline" until it reports in.
+        self.last_seen: Optional[float] = None
+
     # ------------------------------------------------------------------
     # State properties (HA units)
     # ------------------------------------------------------------------
@@ -87,8 +101,25 @@ class CyncBLEDevice:
     def is_connected(self) -> bool:
         return self._mesh_client.is_connected
 
+    @property
+    def is_available(self) -> bool:
+        """Whether this specific device is believed reachable right now.
+
+        Unlike is_connected (shared mesh GATT connection), this also
+        requires a status notification from THIS device within
+        DEVICE_OFFLINE_TIMEOUT — so a bulb that loses power still shows
+        unavailable even while the mesh connection stays up through another
+        bulb. See coordinator's periodic request_status() re-poll.
+        """
+        if not self._mesh_client.is_connected:
+            return False
+        if self.last_seen is None:
+            return False
+        return (time.monotonic() - self.last_seen) < DEVICE_OFFLINE_TIMEOUT
+
     def update_from_status(self, status: DeviceStatus) -> None:
         """Update state from a mesh notification."""
+        self.last_seen = time.monotonic()
         # mesh brightness is 0–100; convert to 0–255
         self._brightness = _mesh_brightness_to_ha(status.brightness)
         self._is_on = status.brightness > 0
@@ -311,10 +342,18 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                         self._mesh_was_connected[mesh_name] = True
                 except Exception as err:
                     _LOGGER.debug("Could not connect to mesh %s: %s", mesh_name, err)
-            elif not was_connected:
-                # Log once when connection is (re)established
-                _LOGGER.info("Mesh %s is now connected", mesh_name)
-                self._mesh_was_connected[mesh_name] = True
+            else:
+                if not was_connected:
+                    # Log once when connection is (re)established
+                    _LOGGER.info("Mesh %s is now connected", mesh_name)
+                    self._mesh_was_connected[mesh_name] = True
+                # Re-poll so per-device availability reflects devices that
+                # have actually gone quiet (e.g. powered off), not just
+                # whether the shared mesh connection is still open.
+                try:
+                    await client.request_status()
+                except Exception as err:
+                    _LOGGER.debug("Status poll failed for mesh %s: %s", mesh_name, err)
         return self._devices
 
     # ------------------------------------------------------------------

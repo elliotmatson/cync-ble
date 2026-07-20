@@ -75,6 +75,17 @@ POLL_INTERVAL: Final = 60
 # this cap prevents flooding proxy slots during reconnect storms.
 MAX_CONCURRENT_CONNECTIONS: Final = 3
 
+# A device is marked unavailable if it hasn't answered a status request in
+# this long, even though the shared mesh connection is still up (e.g. it lost
+# power). Set well above POLL_INTERVAL so one missed re-poll doesn't flap it.
+DEVICE_OFFLINE_TIMEOUT: Final = 180
+
+# After this many consecutive connect failures on a specific mesh MAC, skip
+# it for MAC_COOLDOWN_SECONDS so a single bad node can't block reconnection
+# to the rest of the mesh.
+MAC_FAIL_THRESHOLD: Final = 2
+MAC_COOLDOWN_SECONDS: Final = 120
+
 # Attributes
 ATTR_SESSION_TOKEN: Final = "session_token"
 ATTR_MESH_ID: Final = "mesh_id"
