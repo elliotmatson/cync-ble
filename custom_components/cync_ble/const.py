@@ -75,7 +75,7 @@ BLE_CMD_EFFECT: Final = 0x05
 
 # Timeouts
 SCAN_TIMEOUT: Final = 30
-BLE_TIMEOUT: Final = 10
+BLE_TIMEOUT: Final = 5
 CLOUD_TIMEOUT: Final = 10
 
 # Update intervals

@@ -112,6 +112,29 @@ def _decrypt_packet(sk: list[int], address: list[int], packet: list[int]) -> lis
 
 
 # ---------------------------------------------------------------------------
+# GATT I/O bounded by BLE_TIMEOUT — bleak/ESPHome's own default (~30s) is far
+# longer than send_packet's retry-with-reconnect needs to wait before giving
+# up on a hung write and trying again, so a stuck operation used to sit for
+# the full 30s before recovery could even start.
+# ---------------------------------------------------------------------------
+
+async def _write_gatt(client: Any, char: str, data: bytes, **kwargs: Any) -> None:
+    try:
+        await asyncio.wait_for(client.write_gatt_char(char, data, **kwargs), timeout=BLE_TIMEOUT)
+    except asyncio.TimeoutError:
+        # asyncio.wait_for's TimeoutError carries no message on its own —
+        # give send_packet's warning log something to actually show.
+        raise TimeoutError(f"write to {char} timed out after {BLE_TIMEOUT}s") from None
+
+
+async def _read_gatt(client: Any, char: str) -> bytearray:
+    try:
+        return await asyncio.wait_for(client.read_gatt_char(char), timeout=BLE_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"read from {char} timed out after {BLE_TIMEOUT}s") from None
+
+
+# ---------------------------------------------------------------------------
 # Mesh client
 # ---------------------------------------------------------------------------
 
@@ -287,10 +310,10 @@ class CyncMeshClient:
 
             packet = [0x0C] + data[0:8] + enc_data[0:8]
             _LOGGER.debug("Sending pairing request to %s: %s", mac, bytes(packet).hex())
-            await client.write_gatt_char(CYNC_PAIRING_CHAR, bytes(packet), response=True)
+            await _write_gatt(client, CYNC_PAIRING_CHAR, bytes(packet), response=True)
             await asyncio.sleep(0.3)
 
-            data2 = list(await client.read_gatt_char(CYNC_PAIRING_CHAR))
+            data2 = list(await _read_gatt(client, CYNC_PAIRING_CHAR))
             _LOGGER.debug("Pairing response from %s: %s", mac, bytes(data2).hex())
             if len(data2) < 9:
                 _LOGGER.warning(
@@ -309,9 +332,9 @@ class CyncMeshClient:
             await client.start_notify(CYNC_NOTIFY_CHAR, self._on_notification)
             await asyncio.sleep(0.3)
             _LOGGER.debug("Enabling mesh online-status notifications on %s", mac)
-            await client.write_gatt_char(CYNC_NOTIFY_CHAR, bytes([0x01]), response=True)
+            await _write_gatt(client, CYNC_NOTIFY_CHAR, bytes([0x01]), response=True)
             await asyncio.sleep(0.3)
-            await client.read_gatt_char(CYNC_NOTIFY_CHAR)
+            await _read_gatt(client, CYNC_NOTIFY_CHAR)
 
             self._connected = True
             self._record_mac_success(mac)
@@ -471,7 +494,7 @@ class CyncMeshClient:
                     target, command, data, bytes(enc).hex(),
                 )
                 try:
-                    await client.write_gatt_char(CYNC_CONTROL_CHAR, bytes(enc))
+                    await _write_gatt(client, CYNC_CONTROL_CHAR, bytes(enc))
                     return True
                 except Exception as err:
                     _LOGGER.warning("send_packet failed (attempt %d): %s", attempt + 1, err)
