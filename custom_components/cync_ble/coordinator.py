@@ -283,7 +283,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             return
         client = self._mesh_clients.get(mesh_name)
         # client.connect() guards internally against concurrent/redundant calls
-        if client is None or client.is_connected or client._connecting:
+        if client is None or client.is_connected or client.is_connecting:
             return
         _LOGGER.debug("BLE proxy saw Cync MAC %s — triggering targeted connect", mac)
         # Pass the specific MAC so we only use ONE connection slot, not all 43
