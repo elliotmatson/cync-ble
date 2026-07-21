@@ -41,17 +41,5 @@
         "name": "Cync BLE Light"
       }
     }
-  },
-  "services": {
-    "probe_device": {
-      "name": "Probe device",
-      "description": "Send a direct status query (opcode 0xDA) to one mesh device by ID, to check whether a quiet device is actually still reachable. Experimental — check the debug log for a reply.",
-      "fields": {
-        "device_id": {
-          "name": "Device ID",
-          "description": "The mesh device ID to probe, as seen in the debug log (e.g. the 11 in B3AB645F4604/11)."
-        }
-      }
-    }
   }
 }

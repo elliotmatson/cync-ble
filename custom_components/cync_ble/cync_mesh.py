@@ -41,9 +41,11 @@ from .const import (
     CMD_RGB_SUBCMD,
     CMD_STATUS_RESPONSE,
     CMD_STATUS_QUERY,
+    CMD_STATUS_QUERY_RESPONSE,
     BLE_TIMEOUT,
     MAC_FAIL_THRESHOLD,
     MAC_COOLDOWN_SECONDS,
+    PROBE_TIMEOUT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -149,6 +151,13 @@ class CyncMeshClient:
         # poll) share one connection attempt instead of each trying — and
         # instead of extra callers just giving up while the first is busy.
         self._connect_lock = asyncio.Lock()
+
+        # Set by _on_notification when a CMD_STATUS_QUERY_RESPONSE (0xDB)
+        # arrives, so query_device_status can tell "no reply" apart from
+        # "reply hasn't arrived yet" without the 0xDB payload needing to
+        # carry a device_id — only one probe is ever in flight at a time
+        # (serialized by _write_lock), so there's nothing else it could be.
+        self._probe_reply_event: Optional[asyncio.Event] = None
 
         # Per-MAC connect-failure tracking, so one persistently bad node
         # (e.g. stuck with a stale GATT cache) can't block reconnection to
@@ -366,6 +375,17 @@ class CyncMeshClient:
 
         pkt = _decrypt_packet(self._sk, self._macdata, list(data))
         _LOGGER.debug("Decrypted notification: %s", bytes(pkt).hex())
+        if pkt[7] == CMD_STATUS_QUERY_RESPONSE:
+            # Direct reply to query_device_status() — see const.py for why we
+            # only treat its arrival as "device answered" for now rather than
+            # decoding Params[0:6] into brightness/color.
+            _LOGGER.debug(
+                "Status query reply (0xDB) received: params=%s",
+                bytes(pkt[10:20]).hex(),
+            )
+            if self._probe_reply_event is not None:
+                self._probe_reply_event.set()
+            return
         if pkt[7] != CMD_STATUS_RESPONSE:
             return
 
@@ -488,20 +508,34 @@ class CyncMeshClient:
         except Exception as err:
             _LOGGER.debug("Status poll failed: %s", err)
 
-    async def query_device_status(self, device_id: int, relay_count: int = 0x10) -> bool:
-        """Ask one specific device to report in (opcode 0xDA), for diagnosing
-        whether a quiet device is actually still reachable.
+    async def query_device_status(
+        self, device_id: int, relay_count: int = 0x10, timeout: float = PROBE_TIMEOUT
+    ) -> bool:
+        """Ask one specific device to report in (opcode 0xDA) and wait for
+        its CMD_STATUS_QUERY_RESPONSE (0xDB) reply, for diagnosing whether a
+        quiet device is actually still reachable.
 
         Unlike request_status's 0xFFFF broadcast, this targets a single
-        device_id — the spec describes this as the real outbound status
-        query, with 0xDC being inbound-only. Experimental: we haven't
-        confirmed what, if anything, Cync's firmware sends back for this
-        opcode. Whatever arrives will show up via the existing
-        "Decrypted notification" / "Status notification received" debug
-        logs, or as an "unrecognized device" warning if it comes back under
-        a different device_id than expected.
+        device_id. Confirmed against real Cync firmware: a reachable device
+        answers within ~250ms; an unreachable one produces nothing at all —
+        a real liveness signal the push-on-change broadcast can't give us.
+        Returns whether a reply arrived in time, not just whether the query
+        write succeeded. allow_reconnect=False: a probe is diagnostic —
+        getting no reply shouldn't tear down an otherwise-healthy connection.
         """
-        return await self.send_packet(device_id, CMD_STATUS_QUERY, [relay_count])
+        self._probe_reply_event = asyncio.Event()
+        try:
+            if not await self.send_packet(
+                device_id, CMD_STATUS_QUERY, [relay_count], allow_reconnect=False
+            ):
+                return False
+            try:
+                await asyncio.wait_for(self._probe_reply_event.wait(), timeout=timeout)
+                return True
+            except asyncio.TimeoutError:
+                return False
+        finally:
+            self._probe_reply_event = None
 
     # ------------------------------------------------------------------
     # High-level device commands

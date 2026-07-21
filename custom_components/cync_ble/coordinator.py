@@ -23,6 +23,9 @@ from .const import (
     MIN_COLOR_TEMP,
     MAX_COLOR_TEMP,
     MAX_CONCURRENT_CONNECTIONS,
+    PROBE_QUIET_THRESHOLD,
+    PROBE_INTERVAL,
+    PROBE_MISS_THRESHOLD,
 )
 from .cync_mesh import CyncMeshClient, DeviceStatus
 
@@ -75,6 +78,14 @@ class CyncBLEDevice:
         # cync2mqtt seeding every device "offline" until it reports in.
         self.last_seen: Optional[float] = None
 
+        # Liveness-probe state (see probe_if_quiet) — a device that's gone
+        # quiet under the push-on-change protocol isn't necessarily gone,
+        # but PROBE_MISS_THRESHOLD consecutive unanswered probes is real
+        # evidence it might be, unlike mere silence.
+        self._probe_miss_count: int = 0
+        self._last_probe_attempt: Optional[float] = None
+        self._confirmed_unreachable: bool = False
+
     # ------------------------------------------------------------------
     # State properties (HA units)
     # ------------------------------------------------------------------
@@ -107,16 +118,51 @@ class CyncBLEDevice:
         The Telink mesh only pushes a status notification when a device is
         first subscribed to and again when its state actually changes (push
         on change, not a heartbeat — see the Telink BLE Mesh Lighting APP
-        spec §3.6.2). An idle bulb that hasn't changed state simply has
-        nothing to report, so silence from it is expected and not a sign
-        it's gone. So: available once it has reported in at all, for as
-        long as the shared mesh connection holds — no staleness timeout.
+        spec §3.6.2), so mere silence from an idle bulb isn't evidence it's
+        gone — hence no staleness timeout here. _confirmed_unreachable is a
+        stronger signal: PROBE_MISS_THRESHOLD consecutive unanswered direct
+        probes (see probe_if_quiet), which push-on-change alone can't give us.
         """
+        if self._confirmed_unreachable:
+            return False
         return self._mesh_client.is_connected and self.last_seen is not None
+
+    def _clear_probe_state(self) -> None:
+        self._probe_miss_count = 0
+        self._confirmed_unreachable = False
+
+    def mark_seen(self) -> None:
+        """Record a liveness confirmation that isn't a full status update —
+        i.e. a successful probe reply (see probe_if_quiet)."""
+        self.last_seen = time.monotonic()
+        self._clear_probe_state()
+
+    async def probe_if_quiet(self) -> None:
+        """Send a direct liveness probe (opcode 0xDA) if this device has
+        been quiet long enough to warrant one, tracking consecutive misses
+        toward PROBE_MISS_THRESHOLD. Called from the coordinator's poll
+        cycle — see CyncMeshClient.query_device_status for what "quiet"
+        actually means here and why it needs a probe instead of just waiting.
+        """
+        if not self._mesh_client.is_connected or self.last_seen is None:
+            return
+        now = time.monotonic()
+        if now - self.last_seen < PROBE_QUIET_THRESHOLD:
+            return
+        if self._last_probe_attempt is not None and now - self._last_probe_attempt < PROBE_INTERVAL:
+            return
+        self._last_probe_attempt = now
+        if await self._mesh_client.query_device_status(self.device_id):
+            self.mark_seen()
+        else:
+            self._probe_miss_count += 1
+            if self._probe_miss_count >= PROBE_MISS_THRESHOLD:
+                self._confirmed_unreachable = True
 
     def update_from_status(self, status: DeviceStatus) -> None:
         """Update state from a mesh notification."""
         self.last_seen = time.monotonic()
+        self._clear_probe_state()
         # mesh brightness is 0–100; convert to 0–255
         self._brightness = _mesh_brightness_to_ha(status.brightness)
         self._is_on = status.brightness > 0
@@ -363,6 +409,13 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                     # Log once when connection is (re)established
                     _LOGGER.info("Mesh %s is now connected", mesh_name)
                     self._mesh_was_connected[mesh_name] = True
+                # Probe any device on this mesh that's been quiet long
+                # enough to warrant one — see CyncBLEDevice.probe_if_quiet.
+                # Each call is a cheap no-op unless that device is actually
+                # due, so this is fine to check every cycle.
+                for key, device in self._devices.items():
+                    if key.split("/", 1)[0] == mesh_name:
+                        await device.probe_if_quiet()
         self._log_availability_changes()
         return self._devices
 
@@ -401,29 +454,6 @@ class CyncBLECoordinator(DataUpdateCoordinator):
 
     def get_devices(self) -> dict[str, CyncBLEDevice]:
         return self._devices
-
-    async def probe_device(self, device_id: int) -> bool:
-        """Send a direct, per-device status query (opcode 0xDA) for
-        diagnosing whether a device that's gone quiet is actually still
-        reachable — experimental, see CyncMeshClient.query_device_status.
-        Returns whether a matching device was found and the write went out;
-        any actual reply arrives asynchronously via the usual notification
-        path and debug logs, not as this call's return value.
-        """
-        for key, device in self._devices.items():
-            if device.device_id != device_id:
-                continue
-            mesh_name = key.split("/", 1)[0]
-            client = self._mesh_clients.get(mesh_name)
-            if client is None:
-                return False
-            _LOGGER.warning(
-                "Probing %s (%s) with status query opcode 0xDA — watch the debug log for a reply",
-                device.name, key,
-            )
-            return await client.query_device_status(device_id)
-        _LOGGER.warning("probe_device: no configured device with device_id=%s", device_id)
-        return False
 
     async def async_shutdown(self, *_: Any) -> None:
         for cancel in self._cancel_ble_callbacks:

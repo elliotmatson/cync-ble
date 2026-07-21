@@ -27,10 +27,17 @@ CMD_COLOR: Final = 0xE2
 CMD_COLOR_TEMP_SUBCMD: Final = 0x05
 CMD_RGB_SUBCMD: Final = 0x04
 CMD_STATUS_RESPONSE: Final = 0xDC
-# Per the Telink BLE Mesh Lighting APP spec, this — not CMD_STATUS_RESPONSE —
-# is the documented outbound "ask one device to report in" opcode. Unverified
-# against Cync's actual firmware; see CyncMeshClient.query_device_status.
+# The Telink spec's documented outbound "ask one device to report in"
+# opcode — confirmed working against real Cync firmware: a targeted 0xDA
+# query gets back a targeted 0xDB reply within ~250ms when the device is
+# reachable, and nothing at all when it isn't. See
+# CyncMeshClient.query_device_status.
 CMD_STATUS_QUERY: Final = 0xDA
+# Direct reply to a CMD_STATUS_QUERY probe — distinct from the CMD_STATUS_RESPONSE
+# broadcast. Params[0:6] are PWM channel values, Params[8]=TTC, Params[9]=hops
+# per spec, but we haven't verified that channel mapping yet — only used
+# today to recognize that a probed device replied at all.
+CMD_STATUS_QUERY_RESPONSE: Final = 0xDB
 
 # BLE UUIDs (Cync proprietary)
 CYNC_SERVICE_UUID: Final = "00001800-0000-1000-8000-00805f9b34fb"
@@ -84,6 +91,16 @@ MAX_CONCURRENT_CONNECTIONS: Final = 3
 # to the rest of the mesh.
 MAC_FAIL_THRESHOLD: Final = 2
 MAC_COOLDOWN_SECONDS: Final = 120
+
+# Liveness probing (CyncMeshClient.query_device_status, opcode 0xDA) for
+# devices that have gone quiet under the push-on-change protocol — see
+# CyncBLEDevice.probe_if_quiet. A device is probed once it's been quiet this
+# long, at most once per PROBE_INTERVAL, and marked unavailable after
+# PROBE_MISS_THRESHOLD consecutive probes get no reply.
+PROBE_QUIET_THRESHOLD: Final = 120
+PROBE_INTERVAL: Final = 120
+PROBE_MISS_THRESHOLD: Final = 2
+PROBE_TIMEOUT: Final = 3.0
 
 # Attributes
 ATTR_SESSION_TOKEN: Final = "session_token"
