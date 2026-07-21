@@ -142,8 +142,12 @@ class CyncMeshClient:
         self._current_mac: Optional[str] = None
         self._packet_count: int = random.randrange(0xFFFF)
         self._connected = False
-        self._lock = asyncio.Lock()
-        self._connecting = False  # guard against concurrent connect attempts
+        self._write_lock = asyncio.Lock()
+        # Single-flights connect() so concurrent callers (e.g. two lights on
+        # the same mesh commanded at once, or a command racing the periodic
+        # poll) share one connection attempt instead of each trying — and
+        # instead of extra callers just giving up while the first is busy.
+        self._connect_lock = asyncio.Lock()
 
         # Per-MAC connect-failure tracking, so one persistently bad node
         # (e.g. stuck with a stale GATT cache) can't block reconnection to
@@ -155,18 +159,29 @@ class CyncMeshClient:
     def is_connected(self) -> bool:
         return self._connected and self._sk is not None
 
+    @property
+    def is_connecting(self) -> bool:
+        return self._connect_lock.locked()
+
     async def connect(self, preferred_mac: Optional[str] = None) -> bool:
         """Attempt to connect to a mesh MAC.
 
         If preferred_mac is given (e.g. from a BLE advertisement callback),
         try that one first and only that one — avoids flooding proxy slots.
         Otherwise iterate through all known MACs.
-        """
-        if self._connecting or self._connected:
-            return self._connected
 
-        self._connecting = True
-        try:
+        Single-flighted via _connect_lock: if a connect is already in
+        progress, callers wait for it rather than bailing out immediately,
+        then reuse its result. Without this, every light command that
+        arrives while a reconnect is under way used to fail outright.
+        """
+        if self._connected:
+            return True
+
+        async with self._connect_lock:
+            if self._connected:  # another caller finished while we waited
+                return True
+
             if preferred_mac:
                 # Use the device we just saw advertising — single targeted attempt
                 mac = self._normalize_mac(preferred_mac)
@@ -190,8 +205,6 @@ class CyncMeshClient:
                     if await self._connect_to_mac(mac):
                         return True
                 return False
-        finally:
-            self._connecting = False
 
     def _mac_in_cooldown(self, mac: str) -> bool:
         mac = self._normalize_mac(mac)
@@ -300,34 +313,44 @@ class CyncMeshClient:
 
         except Exception as err:
             _LOGGER.warning("Failed to connect to %s: %s", mac, err)
-            self._sk = None
-            self._connected = False
             self._record_mac_failure(mac)
-            if self._client:
-                try:
-                    await self._client.disconnect()
-                except Exception:
-                    pass
-                self._client = None
+            await self._reset_connection_state()
             return False
 
-    def _on_disconnected(self, _client: Any) -> None:
-        """Bleak disconnect callback — called from the BLE stack thread."""
-        if self._connected:
-            _LOGGER.info("BLE connection to mesh %s dropped", self._mesh_name)
+    def _reset_connection_state_sync(self) -> None:
+        """Clear connection state. Callers needing to also close the BLE
+        client should use _reset_connection_state() instead — this variant
+        exists only for the disconnected_callback, which bleak invokes
+        synchronously and can't await.
+        """
         self._connected = False
         self._sk = None
         self._client = None
 
-    async def disconnect(self) -> None:
-        self._connected = False
-        self._sk = None
-        if self._client:
+    async def _reset_connection_state(self) -> None:
+        """Clear connection state and close the old client, if any.
+
+        Grabs the client reference before clearing it so a concurrent
+        send_packet — which reads self._client under _write_lock — never
+        sees a half-cleared state (self._connected False but a stale
+        self._client still around, or vice versa).
+        """
+        client = self._client
+        self._reset_connection_state_sync()
+        if client is not None:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except Exception:
                 pass
-            self._client = None
+
+    def _on_disconnected(self, _client: Any) -> None:
+        """Bleak disconnect callback — invoked synchronously, cannot await."""
+        if self._connected:
+            _LOGGER.info("BLE connection to mesh %s dropped", self._mesh_name)
+        self._reset_connection_state_sync()
+
+    async def disconnect(self) -> None:
+        await self._reset_connection_state()
 
     async def _on_notification(self, sender: Any, data: bytearray) -> None:
         """Handle status notifications from the mesh."""
@@ -393,9 +416,14 @@ class CyncMeshClient:
                 if not allow_reconnect or not await self.connect():
                     return False
 
-            async with self._lock:
-                if self._sk is None or self._macdata is None:
-                    break  # connect failed to produce a session key
+            async with self._write_lock:
+                # Snapshot under the lock rather than reading self._client /
+                # self._sk again below — a disconnect can land between the
+                # is_connected check above and here, and we want a single
+                # consistent view instead of racing a concurrent reset.
+                client, sk, macdata = self._client, self._sk, self._macdata
+                if client is None or sk is None or macdata is None:
+                    continue  # dropped since the check above — let the loop reconnect
 
                 packet = [0] * 20
                 packet[0] = self._packet_count & 0xFF
@@ -408,16 +436,16 @@ class CyncMeshClient:
                 for i, b in enumerate(data):
                     packet[10 + i] = b
 
-                enc = _encrypt_packet(self._sk, self._macdata, packet)
+                enc = _encrypt_packet(sk, macdata, packet)
                 self._packet_count = (self._packet_count + 1) % 65535 or 1
 
                 try:
-                    await self._client.write_gatt_char(CYNC_CONTROL_CHAR, bytes(enc))
+                    await client.write_gatt_char(CYNC_CONTROL_CHAR, bytes(enc))
                     return True
                 except Exception as err:
                     _LOGGER.warning("send_packet failed (attempt %d): %s", attempt + 1, err)
                     if allow_reconnect:
-                        self._connected = False
+                        await self._reset_connection_state()
                     # loop will retry after reconnecting (if allowed)
 
         return False
