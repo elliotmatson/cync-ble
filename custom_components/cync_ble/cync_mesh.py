@@ -40,6 +40,7 @@ from .const import (
     CMD_COLOR_TEMP_SUBCMD,
     CMD_RGB_SUBCMD,
     CMD_STATUS_RESPONSE,
+    CMD_STATUS_QUERY,
     BLE_TIMEOUT,
     MAC_FAIL_THRESHOLD,
     MAC_COOLDOWN_SECONDS,
@@ -486,6 +487,21 @@ class CyncMeshClient:
             await self.request_status()
         except Exception as err:
             _LOGGER.debug("Status poll failed: %s", err)
+
+    async def query_device_status(self, device_id: int, relay_count: int = 0x10) -> bool:
+        """Ask one specific device to report in (opcode 0xDA), for diagnosing
+        whether a quiet device is actually still reachable.
+
+        Unlike request_status's 0xFFFF broadcast, this targets a single
+        device_id — the spec describes this as the real outbound status
+        query, with 0xDC being inbound-only. Experimental: we haven't
+        confirmed what, if anything, Cync's firmware sends back for this
+        opcode. Whatever arrives will show up via the existing
+        "Decrypted notification" / "Status notification received" debug
+        logs, or as an "unrecognized device" warning if it comes back under
+        a different device_id than expected.
+        """
+        return await self.send_packet(device_id, CMD_STATUS_QUERY, [relay_count])
 
     # ------------------------------------------------------------------
     # High-level device commands

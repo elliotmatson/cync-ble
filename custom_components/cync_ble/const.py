@@ -27,6 +27,10 @@ CMD_COLOR: Final = 0xE2
 CMD_COLOR_TEMP_SUBCMD: Final = 0x05
 CMD_RGB_SUBCMD: Final = 0x04
 CMD_STATUS_RESPONSE: Final = 0xDC
+# Per the Telink BLE Mesh Lighting APP spec, this — not CMD_STATUS_RESPONSE —
+# is the documented outbound "ask one device to report in" opcode. Unverified
+# against Cync's actual firmware; see CyncMeshClient.query_device_status.
+CMD_STATUS_QUERY: Final = 0xDA
 
 # BLE UUIDs (Cync proprietary)
 CYNC_SERVICE_UUID: Final = "00001800-0000-1000-8000-00805f9b34fb"

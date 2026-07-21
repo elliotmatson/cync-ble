@@ -3,7 +3,7 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.typing import ConfigType
 
@@ -18,6 +18,18 @@ type CyncBLEConfigEntry = ConfigEntry[CyncBLECoordinator]
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Cync BLE integration."""
+
+    async def _handle_probe_device(call: ServiceCall) -> None:
+        device_id = call.data["device_id"]
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            coordinator = getattr(entry, "runtime_data", None)
+            if coordinator is not None and await coordinator.probe_device(device_id):
+                return
+        _LOGGER.warning(
+            "probe_device: device_id=%s not found in any Cync BLE config entry", device_id
+        )
+
+    hass.services.async_register(DOMAIN, "probe_device", _handle_probe_device)
     return True
 
 

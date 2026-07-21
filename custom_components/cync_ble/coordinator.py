@@ -319,11 +319,21 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         key = f"{status.mesh_name}/{status.device_id}"
         device = self._devices.get(key)
         if device is None:
-            # Seeing this a lot for a device you expect to exist points at a
-            # mesh_name/device_id mismatch rather than the bulb not answering.
-            _LOGGER.debug("Status notification for unknown device %s — ignoring", key)
+            # This is everything the mesh protocol's status broadcast carries
+            # about a device — it has no name/MAC/product fields, only
+            # device_id and current brightness/color state, so this is the
+            # most we can report without also parsing raw BLE advertisement
+            # scan-response data (which does carry ProductUUID and MAC, but
+            # isn't captured anywhere today).
+            _LOGGER.warning(
+                "Status notification for unrecognized device %s — not in your "
+                "configured device list: %s. Check the Cync app for an "
+                "unsynced or leftover device with this ID.",
+                key, status,
+            )
             return
         device.update_from_status(status)
+        self._log_device_availability_edge(key, device)
         self.async_update_listeners()
 
     # ------------------------------------------------------------------
@@ -357,19 +367,30 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         return self._devices
 
     def _log_availability_changes(self) -> None:
-        """Debug-log per-device availability edges (see _device_was_available)."""
+        """Debug-log per-device availability edges (see _device_was_available).
+
+        This periodic sweep is what catches the "went unavailable" edge —
+        nothing pushes an offline event, it's inferred from the mesh
+        connection dropping, so it can only be noticed on a poll cycle. The
+        "became available" edge is also logged immediately from
+        _on_device_status as soon as a status notification arrives, so it
+        doesn't have to wait for the next cycle here.
+        """
         for key, device in self._devices.items():
-            available = device.is_available
-            if available == self._device_was_available.get(key, False):
-                continue
-            age = None if device.last_seen is None else time.monotonic() - device.last_seen
-            _LOGGER.debug(
-                "%s (%s) is now %s (last status %s ago)",
-                device.name, key,
-                "available" if available else "unavailable",
-                "unknown" if age is None else f"{age:.0f}s",
-            )
-            self._device_was_available[key] = available
+            self._log_device_availability_edge(key, device)
+
+    def _log_device_availability_edge(self, key: str, device: CyncBLEDevice) -> None:
+        available = device.is_available
+        if available == self._device_was_available.get(key, False):
+            return
+        age = None if device.last_seen is None else time.monotonic() - device.last_seen
+        _LOGGER.debug(
+            "%s (%s) is now %s (last status %s ago)",
+            device.name, key,
+            "available" if available else "unavailable",
+            "unknown" if age is None else f"{age:.0f}s",
+        )
+        self._device_was_available[key] = available
 
     # ------------------------------------------------------------------
     # Public API
@@ -380,6 +401,29 @@ class CyncBLECoordinator(DataUpdateCoordinator):
 
     def get_devices(self) -> dict[str, CyncBLEDevice]:
         return self._devices
+
+    async def probe_device(self, device_id: int) -> bool:
+        """Send a direct, per-device status query (opcode 0xDA) for
+        diagnosing whether a device that's gone quiet is actually still
+        reachable — experimental, see CyncMeshClient.query_device_status.
+        Returns whether a matching device was found and the write went out;
+        any actual reply arrives asynchronously via the usual notification
+        path and debug logs, not as this call's return value.
+        """
+        for key, device in self._devices.items():
+            if device.device_id != device_id:
+                continue
+            mesh_name = key.split("/", 1)[0]
+            client = self._mesh_clients.get(mesh_name)
+            if client is None:
+                return False
+            _LOGGER.warning(
+                "Probing %s (%s) with status query opcode 0xDA — watch the debug log for a reply",
+                device.name, key,
+            )
+            return await client.query_device_status(device_id)
+        _LOGGER.warning("probe_device: no configured device with device_id=%s", device_id)
+        return False
 
     async def async_shutdown(self, *_: Any) -> None:
         for cancel in self._cancel_ble_callbacks:
