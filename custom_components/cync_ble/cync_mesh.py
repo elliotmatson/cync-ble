@@ -276,10 +276,12 @@ class CyncMeshClient:
             enc_data = _key_encrypt(self._mesh_name, self._mesh_password, data)
 
             packet = [0x0C] + data[0:8] + enc_data[0:8]
+            _LOGGER.debug("Sending pairing request to %s: %s", mac, bytes(packet).hex())
             await client.write_gatt_char(CYNC_PAIRING_CHAR, bytes(packet), response=True)
             await asyncio.sleep(0.3)
 
             data2 = list(await client.read_gatt_char(CYNC_PAIRING_CHAR))
+            _LOGGER.debug("Pairing response from %s: %s", mac, bytes(data2).hex())
             if len(data2) < 9:
                 _LOGGER.warning(
                     "Pairing response from %s too short (%d bytes) — wrong mesh credentials?",
@@ -296,6 +298,7 @@ class CyncMeshClient:
             # ---- Enable notifications ----
             await client.start_notify(CYNC_NOTIFY_CHAR, self._on_notification)
             await asyncio.sleep(0.3)
+            _LOGGER.debug("Enabling mesh online-status notifications on %s", mac)
             await client.write_gatt_char(CYNC_NOTIFY_CHAR, bytes([0x01]), response=True)
             await asyncio.sleep(0.3)
             await client.read_gatt_char(CYNC_NOTIFY_CHAR)
@@ -354,12 +357,14 @@ class CyncMeshClient:
 
     async def _on_notification(self, sender: Any, data: bytearray) -> None:
         """Handle status notifications from the mesh."""
+        _LOGGER.debug("BLE notification received: %s", bytes(data).hex())
         if self._sk is None or self._macdata is None:
             return
         if len(data) < 19:
             return
 
         pkt = _decrypt_packet(self._sk, self._macdata, list(data))
+        _LOGGER.debug("Decrypted notification: %s", bytes(pkt).hex())
         if pkt[7] != CMD_STATUS_RESPONSE:
             return
 
@@ -440,6 +445,10 @@ class CyncMeshClient:
                 enc = _encrypt_packet(sk, macdata, packet)
                 self._packet_count = (self._packet_count + 1) % 65535 or 1
 
+                _LOGGER.debug(
+                    "Sending packet: target=0x%04X command=0x%02X data=%s wire=%s",
+                    target, command, data, bytes(enc).hex(),
+                )
                 try:
                     await client.write_gatt_char(CYNC_CONTROL_CHAR, bytes(enc))
                     return True
@@ -454,21 +463,21 @@ class CyncMeshClient:
     async def request_status(self) -> bool:
         """Broadcast a status request so every device in the mesh reports in.
 
-        Called once right after connecting, and periodically by the
-        coordinator thereafter — a device that stops answering (e.g. it lost
-        power) simply won't produce a notification, which is how per-device
-        availability gets derived (the mesh protocol has no explicit
-        online/offline event; cync2mqtt uses this same poll-and-check
-        pattern). allow_reconnect=False: see send_packet.
+        Called once right after connecting. The mesh only pushes status on
+        subscribe or on an actual state change (push-on-change, not a
+        heartbeat — see the Telink BLE Mesh Lighting APP spec §3.6.2), so
+        repeating this later doesn't provoke anything from idle devices; see
+        CyncBLEDevice.is_available for how per-device availability is
+        derived without relying on that. allow_reconnect=False: see
+        send_packet.
         """
         return await self.send_packet(0xFFFF, CMD_STATUS_RESPONSE, [0x10], allow_reconnect=False)
 
     def request_status_nowait(self) -> None:
         """Fire request_status() in the background without blocking the caller.
 
-        Used right after connecting (so a slow proxy write can't delay
-        connect() itself) and by the coordinator's periodic poll (so one
-        slow mesh can't stall the whole update cycle).
+        Used right after connecting so a slow proxy write can't delay
+        connect() itself.
         """
         self._hass.async_create_task(self._safe_request_status())
 

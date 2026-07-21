@@ -23,7 +23,6 @@ from .const import (
     MIN_COLOR_TEMP,
     MAX_COLOR_TEMP,
     MAX_CONCURRENT_CONNECTIONS,
-    DEVICE_OFFLINE_TIMEOUT,
 )
 from .cync_mesh import CyncMeshClient, DeviceStatus
 
@@ -105,17 +104,15 @@ class CyncBLEDevice:
     def is_available(self) -> bool:
         """Whether this specific device is believed reachable right now.
 
-        Unlike is_connected (shared mesh GATT connection), this also
-        requires a status notification from THIS device within
-        DEVICE_OFFLINE_TIMEOUT — so a bulb that loses power still shows
-        unavailable even while the mesh connection stays up through another
-        bulb. See coordinator's periodic request_status() re-poll.
+        The Telink mesh only pushes a status notification when a device is
+        first subscribed to and again when its state actually changes (push
+        on change, not a heartbeat — see the Telink BLE Mesh Lighting APP
+        spec §3.6.2). An idle bulb that hasn't changed state simply has
+        nothing to report, so silence from it is expected and not a sign
+        it's gone. So: available once it has reported in at all, for as
+        long as the shared mesh connection holds — no staleness timeout.
         """
-        if not self._mesh_client.is_connected:
-            return False
-        if self.last_seen is None:
-            return False
-        return (time.monotonic() - self.last_seen) < DEVICE_OFFLINE_TIMEOUT
+        return self._mesh_client.is_connected and self.last_seen is not None
 
     def update_from_status(self, status: DeviceStatus) -> None:
         """Update state from a mesh notification."""
@@ -249,9 +246,10 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         # Track per-mesh unavailability so we log once on loss, once on recovery
         self._mesh_was_connected: dict[str, bool] = {mn: False for mn in mesh_info}
 
-        # Same idea per-device: is_available is time-based (last_seen vs
-        # DEVICE_OFFLINE_TIMEOUT), not an explicit event, so _async_update_data
-        # diffs against this each cycle to log only on the edges.
+        # Same idea per-device: is_available depends on is_connected and
+        # last_seen rather than firing an explicit event, so
+        # _async_update_data diffs against this each cycle to log only the
+        # edges (see CyncBLEDevice.is_available).
         self._device_was_available: dict[str, bool] = {key: False for key in self._devices}
 
         # Semaphore caps simultaneous BLE connection attempts across all meshes.
@@ -355,13 +353,6 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                     # Log once when connection is (re)established
                     _LOGGER.info("Mesh %s is now connected", mesh_name)
                     self._mesh_was_connected[mesh_name] = True
-                # Re-poll so per-device availability reflects devices that
-                # have actually gone quiet (e.g. powered off), not just
-                # whether the shared mesh connection is still open. Fired in
-                # the background — a slow/failed poll write must not stall
-                # this update cycle or tear down an otherwise-healthy mesh
-                # connection (see CyncMeshClient.request_status_nowait).
-                client.request_status_nowait()
         self._log_availability_changes()
         return self._devices
 
