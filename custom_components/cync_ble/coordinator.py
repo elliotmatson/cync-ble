@@ -249,6 +249,11 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         # Track per-mesh unavailability so we log once on loss, once on recovery
         self._mesh_was_connected: dict[str, bool] = {mn: False for mn in mesh_info}
 
+        # Same idea per-device: is_available is time-based (last_seen vs
+        # DEVICE_OFFLINE_TIMEOUT), not an explicit event, so _async_update_data
+        # diffs against this each cycle to log only on the edges.
+        self._device_was_available: dict[str, bool] = {key: False for key in self._devices}
+
         # Semaphore caps simultaneous BLE connection attempts across all meshes.
         # 1 connection per mesh is enough (Telink mesh routing handles the rest);
         # a small cap prevents proxy slot exhaustion during reconnect storms.
@@ -316,6 +321,9 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         key = f"{status.mesh_name}/{status.device_id}"
         device = self._devices.get(key)
         if device is None:
+            # Seeing this a lot for a device you expect to exist points at a
+            # mesh_name/device_id mismatch rather than the bulb not answering.
+            _LOGGER.debug("Status notification for unknown device %s — ignoring", key)
             return
         device.update_from_status(status)
         self.async_update_listeners()
@@ -354,7 +362,23 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                 # this update cycle or tear down an otherwise-healthy mesh
                 # connection (see CyncMeshClient.request_status_nowait).
                 client.request_status_nowait()
+        self._log_availability_changes()
         return self._devices
+
+    def _log_availability_changes(self) -> None:
+        """Debug-log per-device availability edges (see _device_was_available)."""
+        for key, device in self._devices.items():
+            available = device.is_available
+            if available == self._device_was_available.get(key, False):
+                continue
+            age = None if device.last_seen is None else time.monotonic() - device.last_seen
+            _LOGGER.debug(
+                "%s (%s) is now %s (last status %s ago)",
+                device.name, key,
+                "available" if available else "unavailable",
+                "unknown" if age is None else f"{age:.0f}s",
+            )
+            self._device_was_available[key] = available
 
     # ------------------------------------------------------------------
     # Public API

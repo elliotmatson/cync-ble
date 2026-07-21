@@ -391,6 +391,7 @@ class CyncMeshClient:
                 red=red, green=green, blue=blue,
                 color_temp=color_temp,
             )
+            _LOGGER.debug("Status notification received: %s", status)
             if self._status_callback:
                 try:
                     await self._status_callback(status)
