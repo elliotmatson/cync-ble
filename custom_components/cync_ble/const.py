@@ -98,7 +98,7 @@ MAC_COOLDOWN_SECONDS: Final = 120
 # this, a blip that self-heals before the next slower poll-cycle check still
 # gets logged as every device on the mesh going unavailable and immediately
 # back, which isn't meaningful and just clutters the log.
-RECONNECT_GRACE_PERIOD: Final = 10
+RECONNECT_GRACE_PERIOD: Final = 20
 
 # Liveness probing (CyncMeshClient.query_device_status, opcode 0xDA) for
 # devices that have gone quiet under the push-on-change protocol — see
