@@ -92,6 +92,14 @@ MAX_CONCURRENT_CONNECTIONS: Final = 3
 MAC_FAIL_THRESHOLD: Final = 2
 MAC_COOLDOWN_SECONDS: Final = 120
 
+# A mesh disconnect this brief or shorter doesn't flip devices unavailable —
+# see CyncMeshClient.recently_disconnected. The fast BLE-advertisement-
+# triggered reconnect path usually resolves a drop in a few seconds; without
+# this, a blip that self-heals before the next slower poll-cycle check still
+# gets logged as every device on the mesh going unavailable and immediately
+# back, which isn't meaningful and just clutters the log.
+RECONNECT_GRACE_PERIOD: Final = 10
+
 # Liveness probing (CyncMeshClient.query_device_status, opcode 0xDA) for
 # devices that have gone quiet under the push-on-change protocol — see
 # CyncBLEDevice.probe_if_quiet. A device is probed once it's been quiet this

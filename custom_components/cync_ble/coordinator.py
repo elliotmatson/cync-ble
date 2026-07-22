@@ -122,10 +122,15 @@ class CyncBLEDevice:
         gone — hence no staleness timeout here. _confirmed_unreachable is a
         stronger signal: PROBE_MISS_THRESHOLD consecutive unanswered direct
         probes (see probe_if_quiet), which push-on-change alone can't give us.
+
+        A mesh connection drop doesn't flip this immediately either —
+        recently_disconnected absorbs a blip that self-heals within
+        RECONNECT_GRACE_PERIOD, so a brief reconnect doesn't flip every
+        device on the mesh unavailable and back for no meaningful reason.
         """
-        if self._confirmed_unreachable:
+        if self._confirmed_unreachable or self.last_seen is None:
             return False
-        return self._mesh_client.is_connected and self.last_seen is not None
+        return self._mesh_client.is_connected or self._mesh_client.recently_disconnected
 
     def _clear_probe_state(self) -> None:
         self._probe_miss_count = 0

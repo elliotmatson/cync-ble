@@ -46,6 +46,7 @@ from .const import (
     MAC_FAIL_THRESHOLD,
     MAC_COOLDOWN_SECONDS,
     PROBE_TIMEOUT,
+    RECONNECT_GRACE_PERIOD,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,6 +169,11 @@ class CyncMeshClient:
         self._current_mac: Optional[str] = None
         self._packet_count: int = random.randrange(0xFFFF)
         self._connected = False
+        # Monotonic time of the first reset since the last successful
+        # connect — see recently_disconnected. Set once per outage (not on
+        # every failed retry within it) so a grace period actually expires
+        # on a sustained one instead of continuously extending.
+        self._disconnected_at: Optional[float] = None
         self._write_lock = asyncio.Lock()
         # Single-flights connect() so concurrent callers (e.g. two lights on
         # the same mesh commanded at once, or a command racing the periodic
@@ -195,6 +201,17 @@ class CyncMeshClient:
     @property
     def is_connecting(self) -> bool:
         return self._connect_lock.locked()
+
+    @property
+    def recently_disconnected(self) -> bool:
+        """True if disconnected but within RECONNECT_GRACE_PERIOD of when it
+        dropped. Lets CyncBLEDevice.is_available absorb a blip that
+        self-heals via the fast BLE-advertisement reconnect path before it's
+        ever meaningfully "unavailable" to anything downstream.
+        """
+        if self.is_connected or self._disconnected_at is None:
+            return False
+        return time.monotonic() - self._disconnected_at < RECONNECT_GRACE_PERIOD
 
     async def connect(self, preferred_mac: Optional[str] = None) -> bool:
         """Attempt to connect to a mesh MAC.
@@ -337,6 +354,7 @@ class CyncMeshClient:
             await _read_gatt(client, CYNC_NOTIFY_CHAR)
 
             self._connected = True
+            self._disconnected_at = None
             self._record_mac_success(mac)
             _LOGGER.info("Connected to Cync mesh via %s", mac)
 
@@ -359,6 +377,8 @@ class CyncMeshClient:
         exists only for the disconnected_callback, which bleak invokes
         synchronously and can't await.
         """
+        if self._disconnected_at is None:
+            self._disconnected_at = time.monotonic()
         self._connected = False
         self._sk = None
         self._client = None
