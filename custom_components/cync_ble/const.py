@@ -2,7 +2,7 @@
 from typing import Final
 
 DOMAIN: Final = "cync_ble"
-PLATFORMS: Final = ["light"]
+PLATFORMS: Final = ["light", "switch", "fan"]
 
 # Cloud API endpoints (GE Lighting / Cync) — verified from cync2mqtt reference
 CYNC_CLOUD_URL: Final = "https://api.gelighting.com"

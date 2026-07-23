@@ -174,8 +174,10 @@ class CyncCloudClient:
                     "access_key": access_key,  # used as BLE mesh "password"
                     "mesh_display_name": mesh_name,
                     "device_type": dtype,
-                    "supports_rgb": dtype in _RGB_TYPES,
-                    "supports_temperature": dtype in _COLOR_TEMP_TYPES,
+                    "supports_rgb": dtype in Capabilities["RGB"],
+                    "supports_temperature": dtype in Capabilities["COLORTEMP"],
+                    "is_plug": dtype in Capabilities["PLUG"],
+                    "is_fan": dtype in Capabilities["FAN"],
                 })
 
         _LOGGER.debug("Found %d bulbs across %d meshes", len(devices), len(meshes) if isinstance(meshes, list) else 0)
@@ -227,16 +229,20 @@ def _normalize_mac(mac: str) -> str:
     return mac  # return as-is if unexpected format
 
 
-# Device type capability lists — from cync2mqtt/acync device.Capabilities
-_RGB_TYPES = frozenset([
-    6, 7, 8, 21, 22, 23, 30, 31, 32, 33, 34, 35,
-    131, 132, 133, 137, 138, 139, 140, 141, 142, 143,
-    146, 147, 153, 154, 156, 158, 159, 160, 161, 162, 163, 164, 165,
-])
-_COLOR_TEMP_TYPES = frozenset([
-    5, 6, 7, 8, 10, 11, 14, 15, 19, 20, 21, 22, 23, 25, 26, 28, 29,
-    30, 31, 32, 33, 34, 35, 80, 82, 83, 85,
-    129, 130, 131, 132, 133, 135, 136, 137, 138, 139, 140, 141, 142,
-    143, 144, 145, 146, 147, 153, 154, 156, 158, 159, 160, 161, 162,
-    163, 164, 165,
-])
+# Device type → capability lookup, verbatim from nikshriv/cync_lights'
+# cync_hub.py (https://github.com/nikshriv/cync_lights) — only RGB and
+# COLORTEMP are consumed today, but kept as one unmodified table so the
+# rest (PLUG, FAN, MOTION, AMBIENT_LIGHT, MULTIELEMENT, ...) is ready to
+# wire up without re-deriving the data again.
+Capabilities = {
+    "ONOFF":[1,5,6,7,8,9,10,11,13,14,15,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,47,48,49,51,52,53,54,55,56,57,58,59,61,62,63,64,65,66,67,68,80,81,82,83,85,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171,172],
+    "BRIGHTNESS":[1,5,6,7,8,9,10,11,13,14,15,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,47,48,49,55,56,80,81,82,83,85,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171],
+    "COLORTEMP":[5,6,7,8,10,11,14,15,19,20,21,22,23,25,26,28,29,30,31,32,33,34,35,47,80,82,83,85,129,130,131,132,133,135,136,137,138,139,140,141,142,143,144,145,146,147,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171],
+    "RGB":[6,7,8,21,22,23,30,31,32,33,34,35,47,131,132,133,137,138,139,140,141,142,143,146,147,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171],
+    "MOTION":[37,49,54],
+    "AMBIENT_LIGHT":[37,49,54],
+    "WIFICONTROL":[36,37,38,39,40,47,48,49,51,52,53,54,55,56,57,58,59,61,62,63,64,65,66,67,68,80,81,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,158,159,160,161,162,163,164,165,166,169,170,171,172],
+    "PLUG":[64,65,66,67,68,172],
+    "FAN":[81],
+    "MULTIELEMENT":{'67':2}
+}

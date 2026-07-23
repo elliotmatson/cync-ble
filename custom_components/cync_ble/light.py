@@ -32,7 +32,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up light entities from a config entry."""
     coordinator: CyncBLECoordinator = config_entry.runtime_data
-    entities = [CyncBLELight(coordinator, device) for device in coordinator.get_devices().values()]
+    entities = [
+        CyncBLELight(coordinator, device)
+        for device in coordinator.get_devices().values()
+        if not device.is_plug and not device.is_fan
+    ]
     async_add_entities(entities)
 
 

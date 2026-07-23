@@ -59,6 +59,8 @@ class CyncBLEDevice:
         self.device_type: int = device_dict.get("device_type", 0)
         self.supports_rgb: bool = device_dict.get("supports_rgb", False)
         self.supports_temperature: bool = device_dict.get("supports_temperature", True)
+        self.is_plug: bool = device_dict.get("is_plug", False)
+        self.is_fan: bool = device_dict.get("is_fan", False)
 
         # Alias for compatibility with light.py
         self.mac_address = self.mac
@@ -96,6 +98,13 @@ class CyncBLEDevice:
     @property
     def brightness(self) -> int:
         return self._brightness
+
+    @property
+    def percentage(self) -> int:
+        """Fan speed, 0-100 — the mesh protocol has no distinct speed opcode,
+        it's the same brightness command (0-100) reused, so this is just
+        `brightness` on the mesh's native scale instead of HA's 0-255."""
+        return round(self._brightness / 255 * 100)
 
     @property
     def color_temp(self) -> int:
@@ -203,6 +212,15 @@ class CyncBLEDevice:
         result = await self._mesh_client.set_brightness(self.device_id, mesh_val)
         if result:
             self._brightness = brightness
+        return result
+
+    async def set_percentage(self, percentage: int) -> bool:
+        """percentage: fan speed 0-100 — sent straight through as mesh
+        brightness (see the `percentage` property for why no conversion
+        is needed)."""
+        result = await self._mesh_client.set_brightness(self.device_id, percentage)
+        if result:
+            self._brightness = _mesh_brightness_to_ha(percentage)
         return result
 
     async def set_color_temp(self, kelvin: int) -> bool:
