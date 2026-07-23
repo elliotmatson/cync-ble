@@ -1,13 +1,12 @@
 """Cync BLE integration for Home Assistant."""
 import logging
-from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DOMAIN, PLATFORMS, CONF_DEVICES
+from .const import PLATFORMS, CONF_DEVICES
 from .coordinator import CyncBLECoordinator
 
 _LOGGER = logging.getLogger(__name__)

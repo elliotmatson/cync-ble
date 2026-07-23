@@ -39,42 +39,17 @@ CMD_STATUS_QUERY: Final = 0xDA
 # today to recognize that a probed device replied at all.
 CMD_STATUS_QUERY_RESPONSE: Final = 0xDB
 
-# BLE UUIDs (Cync proprietary)
-CYNC_SERVICE_UUID: Final = "00001800-0000-1000-8000-00805f9b34fb"
-CYNC_COMMAND_UUID: Final = "0b3e7472-d9d9-11e5-b5d2-0002a5d5c51b"
-CYNC_STATUS_UUID: Final = "0b3e7473-d9d9-11e5-b5d2-0002a5d5c51b"
-CYNC_NOTIFY_UUID: Final = "0b3e7474-d9d9-11e5-b5d2-0002a5d5c51b"
-
 # Config Keys
 CONF_EMAIL: Final = "email"
 CONF_PASSWORD: Final = "password"
 CONF_SESSION_TOKEN: Final = "session_token"
 CONF_DEVICES: Final = "devices"
-CONF_DEVICE_ID: Final = "device_id"
-CONF_DEVICE_NAME: Final = "device_name"
-CONF_DEVICE_TYPE: Final = "device_type"
-CONF_MAC_ADDRESS: Final = "mac_address"
-CONF_MESH_ID: Final = "mesh_id"
-
-# Device types
-DEVICE_TYPE_BULB: Final = "BULB"
-DEVICE_TYPE_STRIP: Final = "STRIP"
 
 # Light capabilities
-MIN_BRIGHTNESS: Final = 1
-MAX_BRIGHTNESS: Final = 254
 MIN_COLOR_TEMP: Final = 2000
-MAX_COLOR_TEMP: Final = 6500
-
-# BLE Command types
-BLE_CMD_POWER: Final = 0x01
-BLE_CMD_BRIGHTNESS: Final = 0x02
-BLE_CMD_COLOR_TEMP: Final = 0x03
-BLE_CMD_RGB: Final = 0x04
-BLE_CMD_EFFECT: Final = 0x05
+MAX_COLOR_TEMP: Final = 7000
 
 # Timeouts
-SCAN_TIMEOUT: Final = 30
 BLE_TIMEOUT: Final = 5
 CLOUD_TIMEOUT: Final = 10
 
@@ -109,8 +84,3 @@ PROBE_QUIET_THRESHOLD: Final = 120
 PROBE_INTERVAL: Final = 120
 PROBE_MISS_THRESHOLD: Final = 2
 PROBE_TIMEOUT: Final = 3.0
-
-# Attributes
-ATTR_SESSION_TOKEN: Final = "session_token"
-ATTR_MESH_ID: Final = "mesh_id"
-ATTR_DEVICE_ID: Final = "device_id"

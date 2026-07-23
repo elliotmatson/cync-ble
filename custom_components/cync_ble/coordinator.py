@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -15,7 +14,7 @@ from homeassistant.components.bluetooth import (
     async_register_callback,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
