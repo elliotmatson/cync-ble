@@ -50,7 +50,10 @@ MIN_COLOR_TEMP: Final = 2000
 MAX_COLOR_TEMP: Final = 7000
 
 # Timeouts
-BLE_TIMEOUT: Final = 5
+# 5s was tight enough that a merely busy ESPHome proxy produced constant
+# false timeouts (537 in one 48h window) on writes that would otherwise have
+# completed. Still well under bleak's own ~30s default.
+BLE_TIMEOUT: Final = 8
 CLOUD_TIMEOUT: Final = 10
 
 # Update intervals

@@ -518,9 +518,23 @@ class CyncMeshClient:
                     return True
                 except Exception as err:
                     _LOGGER.warning("send_packet failed (attempt %d): %s", attempt + 1, err)
-                    if allow_reconnect:
+                    if not allow_reconnect:
+                        continue
+                    # A failed write is NOT proof the link is gone. Under proxy
+                    # congestion a plain BLE_TIMEOUT is by far the most common
+                    # cause, and tearing the session down forces a full re-pair
+                    # handshake (3 writes + 2 reads) back through the *same*
+                    # congested proxy — which usually times out too. That drops
+                    # the mesh and every device on it, so a single slow write
+                    # used to cost an outage rather than a retry.
+                    #
+                    # Only reset when bleak itself says the link is dead, or
+                    # when we're out of retries (covers the cases where the
+                    # session is wedged but still nominally connected, e.g. a
+                    # GATT error 133 or a stale service cache). Otherwise just
+                    # retry the write on the same live session.
+                    if not getattr(client, "is_connected", False) or attempt == attempts - 1:
                         await self._reset_connection_state()
-                    # loop will retry after reconnecting (if allowed)
 
         return False
 

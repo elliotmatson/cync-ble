@@ -373,6 +373,12 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             connected = await client.connect(preferred_mac=preferred_mac)
             if connected:
                 _LOGGER.info("Connected to mesh %s via BLE proxy", mesh_name)
+                # Both reconnect paths land here now, so record the recovery
+                # edge here rather than in _async_update_data — otherwise a
+                # reconnect driven by an advertisement callback leaves
+                # _mesh_was_connected stale and the next poll cycle logs a
+                # "Lost connection" that already healed.
+                self._mesh_was_connected[mesh_name] = True
                 self.async_update_listeners()
         except Exception as err:
             _LOGGER.debug("Mesh connect attempt failed for %s: %s", mesh_name, err)
@@ -419,13 +425,22 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                         mesh_name,
                     )
                     self._mesh_was_connected[mesh_name] = False
-                try:
-                    connected = await client.connect()
-                    if connected:
-                        _LOGGER.info("Reconnected to mesh %s", mesh_name)
-                        self._mesh_was_connected[mesh_name] = True
-                except Exception as err:
-                    _LOGGER.debug("Could not connect to mesh %s: %s", mesh_name, err)
+                # Reconnect off the coordinator's critical path. Awaiting
+                # connect() inline meant one all-MACs sweep — up to
+                # BLE_TIMEOUT per GATT op, for every MAC in the mesh — could
+                # outlast POLL_INTERVAL and stall the whole update cycle. That
+                # starved the per-device probes below, and worse, starved the
+                # *fast* recovery path: _on_ble_advertisement bails out while
+                # is_connecting is True, so every advertisement that arrived
+                # during a long sweep was dropped. The mesh could then sit
+                # unavailable indefinitely while the slow path kept fighting
+                # congestion it was itself creating.
+                #
+                # _connect_mesh is gated by _connect_sem so this can't flood
+                # proxy slots, and the is_connecting guard keeps successive
+                # poll cycles from stacking redundant attempts.
+                if not client.is_connecting:
+                    self.hass.async_create_task(self._connect_mesh(mesh_name, client))
             else:
                 if not was_connected:
                     # Log once when connection is (re)established
