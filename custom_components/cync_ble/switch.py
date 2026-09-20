@@ -67,11 +67,21 @@ class CyncBLESwitch(SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {
+        attrs: dict[str, Any] = {
             "mac_address": self._device.mac_address,
             "mesh_name": self._device.mesh_name,
             "device_id": self._device.device_id,
         }
+        # Only present once this device has actually answered a
+        # cync_ble.query_firmware_versions run. Nothing reports firmware
+        # unsolicited, so exposing the keys unconditionally would put a
+        # permanent "unknown" on every entity — omitting them instead keeps
+        # their presence meaningful. firmware_version_raw is the sentinel
+        # because an undecodable reply is still a reply.
+        if self._device.firmware_version_raw is not None:
+            attrs["firmware_version"] = self._device.firmware_version
+            attrs["firmware_version_raw"] = self._device.firmware_version_raw
+        return attrs
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         if not await self._device.turn_on():

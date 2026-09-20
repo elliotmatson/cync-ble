@@ -39,6 +39,50 @@ CMD_STATUS_QUERY: Final = 0xDA
 # today to recognize that a probed device replied at all.
 CMD_STATUS_QUERY_RESPONSE: Final = 0xDB
 
+# ---------------------------------------------------------------------------
+# Mesh-OTA firmware version query (groundwork for OTA; not OTA itself)
+#
+# The Telink Android SDK manual (AN-17071702-E1 §5 "OTA/MeshOTA", p.8-9)
+# documents the read command the app issues to collect firmware versions
+# from the whole mesh before starting a MeshOTA:
+#
+#     opcode 0xC7, dest 0xFFFF, params [0x20, 0x00]  -> every device reports
+#                                                       its firmware version
+#     opcode 0xC7, dest 0x0000, params [0x20, 0x05]  -> OTA status of the
+#                                                       directly-connected device
+#
+# It is an ordinary mesh command on the 1912 control characteristic, so it
+# rides the existing send_packet() path, and replies arrive as notifications
+# on 1911 which we already subscribe to.
+# ---------------------------------------------------------------------------
+CMD_MESH_OTA: Final = 0xC7
+# Params[0] — selects the "mesh OTA read" family within opcode 0xC7.
+MESH_OTA_SELECTOR_READ: Final = 0x20
+# Params[1] — which read. GET_VERSION is what we use; GET_OTA_STATE is kept
+# because the manual pairs the two and the eventual OTA flow needs it to
+# check the connected device can drive the upgrade before starting one.
+MESH_OTA_SUB_GET_VERSION: Final = 0x00
+MESH_OTA_SUB_GET_OTA_STATE: Final = 0x05
+
+# INFERRED, NOT VERIFIED. The bundled PDFs document the 0xC7 *request* and
+# say only that "firmware version information of device will be available
+# via analysis" in the notification event — they never name the reply opcode
+# or its payload layout. 0xC8 is LGT_CMD_MESH_OTA_READ_RSP in Telink's own
+# light_ll firmware, which makes it the reasonable inference, but it has NOT
+# been checked against Cync's vendor fork. Everything downstream of this
+# constant is therefore written to be forgiving rather than assertive, and
+# always logs the raw parameter bytes so real hardware can confirm or
+# correct it — see cync_mesh.decode_firmware_version.
+CMD_MESH_OTA_READ_RSP: Final = 0xC8
+
+# How long query_firmware_versions() waits for replies to a 0xFFFF broadcast.
+# There is no reply count to await — we do not know up front how many
+# devices will answer — so this is simply a collection window.
+FIRMWARE_QUERY_WINDOW: Final = 8
+# Bounds for the service's optional `window` field.
+FIRMWARE_QUERY_WINDOW_MIN: Final = 1
+FIRMWARE_QUERY_WINDOW_MAX: Final = 60
+
 # Config Keys
 CONF_EMAIL: Final = "email"
 CONF_PASSWORD: Final = "password"

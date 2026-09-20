@@ -1,0 +1,29 @@
+query_firmware_versions:
+  name: Query firmware versions
+  description: >-
+    Broadcast a Telink mesh-OTA firmware version read to every connected Cync
+    mesh and collect the replies. This is a read-only diagnostic — it does not
+    start an OTA. The response lists every configured device, including the
+    ones that did not answer, since a broadcast read is lossy on a congested
+    mesh and knowing which bulbs stayed silent is part of the result. Raw reply
+    bytes are logged at INFO level and returned alongside the decoded version,
+    because the reply format is inferred from Telink's firmware rather than
+    documented for Cync's fork.
+  fields:
+    window:
+      name: Collection window
+      description: >-
+        How many seconds to wait for replies after broadcasting the query. A
+        broadcast read has no reply count to await, so this is simply how long
+        to listen. Raise it on a large or congested mesh where devices are slow
+        to report.
+      required: false
+      default: 8
+      example: 8
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          unit_of_measurement: seconds
+          mode: slider
