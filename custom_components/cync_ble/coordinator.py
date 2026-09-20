@@ -14,10 +14,12 @@ from homeassistant.components.bluetooth import (
     async_register_callback,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
+    ISSUE_UNKNOWN_DEVICES,
     POLL_INTERVAL,
     MIN_COLOR_TEMP,
     MAX_COLOR_TEMP,
@@ -244,7 +246,12 @@ class CyncBLEDevice:
 class CyncBLECoordinator(DataUpdateCoordinator):
     """Coordinator that manages one CyncMeshClient per mesh network."""
 
-    def __init__(self, hass: HomeAssistant, devices_config: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        devices_config: list[dict[str, Any]],
+        entry_id: Optional[str] = None,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -252,6 +259,15 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=POLL_INTERVAL),
         )
         self._hass = hass
+        # Scopes the unknown-devices repair issue to this entry, so two
+        # accounts don't overwrite each other's issue.
+        self._entry_id = entry_id
+
+        # Device keys we've already reported as unconfigured. Status
+        # notifications arrive continuously, so without this the repair
+        # issue would be recreated on every single notification rather than
+        # raised once per newly-seen device.
+        self._unknown_device_keys: set[str] = set()
 
         def _strip_mac(s: str) -> str:
             """Remove colons/dashes from a MAC string for use as a dict key.
@@ -401,14 +417,68 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             # isn't captured anywhere today).
             _LOGGER.warning(
                 "Status notification for unrecognized device %s — not in your "
-                "configured device list: %s. Check the Cync app for an "
-                "unsynced or leftover device with this ID.",
+                "configured device list: %s. If you paired this device in the "
+                "Cync app after setting up the integration, run Reconfigure on "
+                "the Cync BLE integration to re-sync your device list.",
                 key, status,
             )
+            self._async_note_unknown_device(key)
             return
         device.update_from_status(status)
         self._log_device_availability_edge(key, device)
         self.async_update_listeners()
+
+    # ------------------------------------------------------------------
+    # Repairs — surface unconfigured devices so the user knows to re-sync
+    # ------------------------------------------------------------------
+
+    @callback
+    def _async_note_unknown_device(self, key: str) -> None:
+        """Record an unconfigured device and (re)raise the repair issue.
+
+        The log warning above is easy to miss — someone who pairs a bulb in
+        the Cync app has no reason to be reading the HA log, so without a
+        repair card the re-sync feature only helps users who already know it
+        exists. This puts the discovery where they will actually see it and
+        points at the fix.
+
+        Seen keys are tracked in a set so the issue is raised once per newly
+        seen device rather than once per notification: the mesh pushes status
+        continuously, and re-creating the issue on every one would churn the
+        issue registry for no added information.
+        """
+        if key in self._unknown_device_keys or self._entry_id is None:
+            return
+        self._unknown_device_keys.add(key)
+
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            f"{ISSUE_UNKNOWN_DEVICES}_{self._entry_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_UNKNOWN_DEVICES,
+            translation_placeholders={
+                "count": str(len(self._unknown_device_keys)),
+                "devices": ", ".join(sorted(self._unknown_device_keys)),
+            },
+        )
+
+    @callback
+    def _async_clear_unknown_device_issue(self) -> None:
+        """Drop the repair issue.
+
+        Called from async_shutdown, which a successful re-sync triggers via
+        the entry reload. That makes the card dismiss itself once the device
+        list is actually fixed, rather than leaving a stale warning the user
+        has to clear by hand — and if the device is still unconfigured after
+        the reload, the next status notification simply raises it again.
+        """
+        if self._entry_id is None:
+            return
+        ir.async_delete_issue(
+            self._hass, DOMAIN, f"{ISSUE_UNKNOWN_DEVICES}_{self._entry_id}"
+        )
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator poll (connect if needed; BLE is push-based)
@@ -493,6 +563,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         return self._devices
 
     async def async_shutdown(self, *_: Any) -> None:
+        self._async_clear_unknown_device_issue()
         for cancel in self._cancel_ble_callbacks:
             cancel()
         self._cancel_ble_callbacks.clear()

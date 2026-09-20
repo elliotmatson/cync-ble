@@ -15,6 +15,27 @@
         "data": {
           "otp": "One-time code"
         }
+      },
+      "reconfigure_auth": {
+        "title": "Sign In Again",
+        "description": "Your saved Cync session has expired or could not be used. Sign in again for {email} to re-sync your device list. The email address is fixed by this entry — to use a different Cync account, add a new integration entry instead.",
+        "data": {
+          "password": "Password"
+        }
+      },
+      "reconfigure_otp": {
+        "title": "Check Your Email",
+        "description": "A one-time code was sent to {email}. Enter it below.",
+        "data": {
+          "otp": "One-time code"
+        }
+      },
+      "reconfigure_confirm": {
+        "title": "Re-sync Devices",
+        "description": "Review the changes before applying them.\n\n**New devices ({added_count}):** {added}\n\n**Updated devices ({changed_count}):** {changed}\n\n**No longer in your Cync account ({removed_count}):** {removed}\n\n**Unchanged:** {unchanged_count}\n\nDevices missing from your Cync account are kept by default. Removing one deletes its entities and breaks anything that references them, and devices can drop out of the list temporarily when the Cync API responds partially.",
+        "data": {
+          "remove_missing": "Remove devices no longer in my Cync account"
+        }
       }
     },
     "error": {
@@ -28,7 +49,16 @@
       "no_devices_found": "No Cync devices found in your account",
       "user_cancelled": "Setup cancelled",
       "device_not_found": "Device could not be found",
-      "invalid_source": "Invalid setup source"
+      "invalid_source": "Invalid setup source",
+      "no_changes": "Your device list is already up to date — nothing to change.",
+      "reconfigure_successful": "Device list re-synced successfully.",
+      "cannot_connect": "Failed to connect to Cync cloud. Your device list was left unchanged."
+    }
+  },
+  "issues": {
+    "unknown_devices": {
+      "title": "Unrecognized Cync devices on your mesh",
+      "description": "{count} device(s) are reporting status on your Cync mesh but are not in this integration's device list: {devices}.\n\nThis usually means they were paired in the Cync app after the integration was set up. Use **Reconfigure** on the Cync BLE integration to re-sync your device list and add them.\n\nThis notice clears itself once the re-sync completes."
     }
   }
 }
