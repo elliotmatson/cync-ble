@@ -115,6 +115,23 @@ CLOUD_TIMEOUT: Final = 10
 # Update intervals
 POLL_INTERVAL: Final = 60
 
+# How long CyncBLECoordinator.system_status() may reuse its last snapshot.
+#
+# This exists to collapse a read burst, not to reduce polling. Every
+# diagnostic entity reads the snapshot from both its state value and its
+# attributes, so one async_update_listeners() dispatch produced 21 full
+# recomputations of the same data — all of them inside a single synchronous
+# block, so all 21 were guaranteed identical.
+#
+# A time window rather than explicit invalidation, deliberately: a mesh
+# connect or disconnect happens inside CyncMeshClient via bleak's callback
+# and is not observable at any coordinator mutation point, so an
+# invalidate-on-write scheme would silently serve a stale connection state
+# until the next poll. A window can't miss an event it was never told about.
+# 50ms is ~1000x longer than a dispatch and ~1000x shorter than POLL_INTERVAL,
+# which the rest of the integration already tolerates for connection state.
+STATUS_CACHE_TTL: Final = 0.05
+
 # Max simultaneous BLE connection attempts across all meshes.
 # Telink mesh routing means 1 connection per mesh is sufficient;
 # this cap prevents flooding proxy slots during reconnect storms.

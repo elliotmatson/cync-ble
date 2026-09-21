@@ -160,6 +160,15 @@ def _install_stubs() -> None:
         SensorStateClass=types.SimpleNamespace(MEASUREMENT="measurement"),
     )
     _mod(
+        "homeassistant.components.light",
+        LightEntity=_StubEntity,
+        ColorMode=types.SimpleNamespace(
+            HS="hs", COLOR_TEMP="color_temp", BRIGHTNESS="brightness"),
+        ATTR_BRIGHTNESS="brightness",
+        ATTR_COLOR_TEMP_KELVIN="color_temp_kelvin",
+        ATTR_HS_COLOR="hs_color",
+    )
+    _mod(
         "homeassistant.components.binary_sensor",
         BinarySensorEntity=_StubEntity,
         BinarySensorDeviceClass=types.SimpleNamespace(CONNECTIVITY="connectivity"),

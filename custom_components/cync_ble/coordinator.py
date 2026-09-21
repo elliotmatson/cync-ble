@@ -29,6 +29,7 @@ from .const import (
     PROBE_INTERVAL,
     PROBE_MISS_THRESHOLD,
     PROBE_QUIET_THRESHOLD,
+    STATUS_CACHE_TTL,
 )
 from .cync_mesh import CyncMeshClient, DeviceStatus, DeviceVersion
 
@@ -344,6 +345,10 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         # issue would be recreated on every single notification rather than
         # raised once per newly-seen device.
         self._unknown_device_keys: set[str] = set()
+
+        # Memoised system_status() result — see STATUS_CACHE_TTL.
+        self._status_cache: Optional[dict[str, Any]] = None
+        self._status_cache_at: float = 0.0
 
         def _strip_mac(s: str) -> str:
             """Remove colons/dashes from a MAC string for use as a dict key.
@@ -776,8 +781,18 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         each metric, and so the per-mesh and per-device breakdowns come from
         the same pass — a summary whose counts disagree with its own detail
         lists is worse than no summary.
+
+        Memoised for STATUS_CACHE_TTL. Each diagnostic entity reads this from
+        both its state value and its attributes, so a single listener
+        dispatch asked for it 21 times — every one of them inside the same
+        synchronous block, and therefore guaranteed to produce identical
+        output. See STATUS_CACHE_TTL for why the reuse window is time-based
+        rather than invalidation-based.
         """
         now = time.monotonic()
+        if self._status_cache is not None and \
+                now - self._status_cache_at < STATUS_CACHE_TTL:
+            return self._status_cache
 
         meshes: dict[str, Any] = {
             mesh_name: client.debug_state()
@@ -824,7 +839,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         seen = [d.last_seen_utc for d in self._devices.values() if d.last_seen_utc]
         last_activity = max(seen) if seen else None
 
-        return {
+        status: dict[str, Any] = {
             "meshes": {
                 "total": len(self._mesh_clients),
                 "connected": self.connected_mesh_count,
@@ -852,6 +867,9 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             },
             "last_activity": last_activity,
         }
+        self._status_cache = status
+        self._status_cache_at = now
+        return status
 
     def get_device(self, key: str) -> Optional[CyncBLEDevice]:
         return self._devices.get(key)
