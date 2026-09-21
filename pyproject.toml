@@ -1,0 +1,57 @@
+# Tooling config for CI. Kept explicit rather than relying on tool defaults
+# so a ruff upgrade on the runner can't silently change what CI enforces.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Deliberately a bug-catching set, not a style-opinion set.
+#
+# The rules here are ones where a hit means something is probably wrong:
+#   E/W  — pycodestyle (syntax-adjacent whitespace/format errors)
+#   F    — pyflakes: unused imports, undefined names, shadowed definitions.
+#          This is the one that earns its keep; it caught two genuinely
+#          unused imports the first time it ran.
+#   I    — import ordering, so import-only diffs stay reviewable
+#   B    — bugbear: mutable default args, loop-variable capture, and other
+#          patterns that are bugs rather than preferences
+select = ["E", "W", "F", "I", "B"]
+
+# Not enabled, with reasons — so the next person doesn't assume these were
+# simply overlooked:
+#
+#   UP045 (Optional[X] -> X | None)
+#       Pure modernisation. The codebase uses Optional[...] consistently
+#       throughout; enforcing this would mean ~48 mechanical edits across
+#       every module for no behavioural gain, and would bury real findings
+#       under churn. Worth doing as its own deliberate pass, not as a gate.
+#
+#   BLE001 (blind except), S110 (try-except-pass)
+#       The broad excepts in this integration are deliberate and carry
+#       comments explaining why: notification and service callbacks must
+#       contain their own failures rather than propagate into the BLE
+#       notification handler or the HA event loop, and the disconnect path
+#       intentionally ignores errors from an already-dead client. Flagging
+#       them would train reviewers to ignore the linter.
+#
+#   TRY401 (verbose log message)
+#       Flags `_LOGGER.exception("...: %s", err)`, which this codebase uses
+#       intentionally so the message reads usefully in logs that show only
+#       the summary line.
+ignore = [
+    # Long lines are already bounded by line-length; E501 on top of that
+    # mostly fires on comment prose and URLs that shouldn't be wrapped.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests install stub modules into sys.modules before importing the
+# integration, which necessarily happens after other imports.
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import mode matters: the tests import the integration under a synthetic
+# package name, so pytest must not try to insert the repo root as a package.
+addopts = "-q --strict-markers"

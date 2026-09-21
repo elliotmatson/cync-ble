@@ -13,7 +13,7 @@ counts and the attribute detail can't disagree with each other.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,

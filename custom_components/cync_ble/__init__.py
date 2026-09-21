@@ -4,19 +4,18 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
-    DOMAIN,
-    PLATFORMS,
     CONF_DEVICES,
+    DOMAIN,
     FIRMWARE_QUERY_WINDOW,
-    FIRMWARE_QUERY_WINDOW_MIN,
     FIRMWARE_QUERY_WINDOW_MAX,
+    FIRMWARE_QUERY_WINDOW_MIN,
+    PLATFORMS,
 )
 from .coordinator import CyncBLECoordinator
 

@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes the in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install --disable-pip-version-check -r requirements-test.txt
+      - name: ruff check
+        # Rule selection lives in pyproject.toml, deliberately pinned to a
+        # bug-catching set rather than tool defaults — see the comments there.
+        run: ruff check --output-format=github custom_components/ tests/
+
+  test:
+    name: Tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the floor for the `type X = ...` syntax this integration
+        # already uses; 3.13 is what current Home Assistant ships on.
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - name: Install test dependencies
+        run: pip install --disable-pip-version-check -r requirements-test.txt
+      - name: pytest
+        run: pytest
+
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Home Assistant's own integration validator. Checks manifest.json
+      # keys, ordering, dependency and requirement declarations, and the
+      # config-flow/translation wiring — the structural side the stubbed
+      # tests deliberately cannot cover.
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates the repository the way HACS itself will read it:
+      # hacs.json, repository structure, and release/versioning metadata.
+      - uses: hacs/action@main
+        with:
+          category: integration

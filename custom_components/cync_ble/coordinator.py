@@ -20,15 +20,15 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    FIRMWARE_QUERY_WINDOW,
     ISSUE_UNKNOWN_DEVICES,
-    POLL_INTERVAL,
-    MIN_COLOR_TEMP,
     MAX_COLOR_TEMP,
     MAX_CONCURRENT_CONNECTIONS,
-    PROBE_QUIET_THRESHOLD,
+    MIN_COLOR_TEMP,
+    POLL_INTERVAL,
     PROBE_INTERVAL,
     PROBE_MISS_THRESHOLD,
-    FIRMWARE_QUERY_WINDOW,
+    PROBE_QUIET_THRESHOLD,
 )
 from .cync_mesh import CyncMeshClient, DeviceStatus, DeviceVersion
 
@@ -697,7 +697,11 @@ class CyncBLECoordinator(DataUpdateCoordinator):
 
         queried: list[str] = []
         failed: list[str] = []
-        for mesh_name, result in zip(connected, results):
+        # strict=True: gather() was given exactly connected.values(), so the
+        # lengths match by construction. Asserting it means a future refactor
+        # that breaks the pairing fails loudly instead of silently dropping
+        # the tail of whichever list is longer.
+        for mesh_name, result in zip(connected, results, strict=True):
             if isinstance(result, BaseException):
                 _LOGGER.warning(
                     "Firmware version query failed on mesh %s: %s", mesh_name, result
@@ -787,7 +791,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         firmware: dict[str, Optional[str]] = {}
         available = 0
 
-        for key, device in self._devices.items():
+        for device in self._devices.values():
             if device.is_available:
                 available += 1
             reason = device.unavailable_reason
