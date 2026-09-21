@@ -116,7 +116,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyncBLEConfigEntry) -> b
         return False
 
     try:
-        coordinator = CyncBLECoordinator(hass, devices_config)
+        coordinator = CyncBLECoordinator(hass, devices_config, entry_id=entry.entry_id)
         entry.runtime_data = coordinator
         await coordinator.async_refresh()
     except Exception as err:

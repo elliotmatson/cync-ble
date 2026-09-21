@@ -88,6 +88,17 @@ CONF_EMAIL: Final = "email"
 CONF_PASSWORD: Final = "password"
 CONF_SESSION_TOKEN: Final = "session_token"
 CONF_DEVICES: Final = "devices"
+# The entry has always stored this key; naming it here so the reconfigure
+# flow and the initial flow can't drift apart on its spelling.
+CONF_USER_ID: Final = "user_id"
+# Reconfigure form field — opt in to dropping devices the cloud no longer
+# lists. Defaults off; see device_sync.apply_diff for why.
+CONF_REMOVE_MISSING: Final = "remove_missing"
+
+# Repairs issue raised when the mesh reports status from a device that isn't
+# in the config entry — i.e. one paired in the Cync app after setup. The
+# re-sync only helps if the user finds out they need to run it.
+ISSUE_UNKNOWN_DEVICES: Final = "unknown_devices"
 
 # Light capabilities
 MIN_COLOR_TEMP: Final = 2000

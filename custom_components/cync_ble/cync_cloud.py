@@ -5,6 +5,10 @@ Auth flow:
   2. POST /v2/user_auth/two_factor  (with OTP)  →  access_token + user_id
   3. GET  /v2/user/{user_id}/subscribe/devices  (Access-Token header)  →  mesh list
   4. GET  /v2/product/{pid}/device/{did}/property  →  bulb details per mesh
+
+A stored access_token can be replayed with restore_session() to skip steps
+1-2 entirely; see that method for why the result can only be validated by
+actually spending a request.
 """
 import logging
 import random
@@ -106,6 +110,27 @@ class CyncCloudClient:
         except aiohttp.ClientError as err:
             _LOGGER.error("Network error during auth: %s", err)
             return False
+
+    # ------------------------------------------------------------------
+    # Session restore — reuse a stored token instead of another OTP round trip
+    # ------------------------------------------------------------------
+    def restore_session(self, access_token: str, user_id: str) -> None:
+        """Adopt a previously obtained access_token/user_id.
+
+        Lets a re-sync reuse the token already in the config entry rather
+        than forcing the user through the email-OTP dance again just to read
+        their own device list.
+
+        This does NOT validate the token, and cannot: the API offers no
+        cheap "is this still good?" endpoint, so the only way to find out is
+        to spend a real request. Callers must therefore treat a subsequent
+        get_devices() failure as "possibly expired" and be prepared to fall
+        back to full re-authentication — a failure here is genuinely
+        ambiguous between an expired token and the cloud being down, and
+        nothing in the response distinguishes them.
+        """
+        self._access_token = access_token
+        self._user_id = str(user_id)
 
     # ------------------------------------------------------------------
     # Step 3: device list — GET /v2/user/{user_id}/subscribe/devices
