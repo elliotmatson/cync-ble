@@ -62,10 +62,24 @@ jobs:
   hacs:
     name: HACS validation
     runs-on: ubuntu-latest
+    # ADVISORY, not blocking — and deliberately so.
+    #
+    # One of this action's nine checks ("brands") requires the cync_ble
+    # domain to have icon/logo assets in the home-assistant/brands
+    # repository. That is a pull request against a DIFFERENT repo, so no
+    # change here can ever satisfy it. Leaving the job blocking would mean
+    # permanently red CI, which is precisely the failure mode that made the
+    # old Claude review check worthless: a check that is always red teaches
+    # everyone to ignore every check.
+    #
+    # The output is still worth reading on every run — it catches hacs.json
+    # and structural regressions. Flip this to blocking once the brands PR
+    # has landed upstream.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       # Validates the repository the way HACS itself will read it:
-      # hacs.json, repository structure, and release/versioning metadata.
+      # hacs.json, repository structure, license, and versioning metadata.
       - uses: hacs/action@main
         with:
           category: integration

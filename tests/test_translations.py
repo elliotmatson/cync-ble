@@ -254,6 +254,25 @@ def test_en_json_omits_data_description_by_convention():
 # Version metadata
 # --------------------------------------------------------------------------
 
+def test_manifest_keys_are_sorted_the_way_hassfest_requires():
+    """domain, name, then strict alphabetical.
+
+    hassfest enforces this, and it failed there before it failed here —
+    which is the wrong order. Asserting it locally means the next manifest
+    edit is caught before CI.
+    """
+    keys = list(read_json("manifest.json"))
+    assert keys[:2] == ["domain", "name"]
+    assert keys[2:] == sorted(keys[2:])
+
+
+def test_integration_declares_a_config_schema():
+    """hassfest requires one for any integration that can be configured;
+    this one is config-entry only."""
+    source = (COMPONENT_DIR / "__init__.py").read_text()
+    assert "CONFIG_SCHEMA = cv.config_entry_only_config_schema" in source
+
+
 def test_manifest_version_is_present_and_semver_shaped():
     version = read_json("manifest.json")["version"]
     parts = version.split(".")
