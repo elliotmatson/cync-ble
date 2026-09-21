@@ -239,6 +239,40 @@ def test_answering_a_version_query_marks_the_device_seen(coord):
 
 
 # --------------------------------------------------------------------------
+# Snapshot memoisation
+# --------------------------------------------------------------------------
+
+def test_snapshot_is_reused_within_the_cache_window(coord):
+    """One listener dispatch reads this 21 times inside a single synchronous
+    block; they must not each recompute it."""
+    first = coord.system_status()
+    assert coord.system_status() is first
+
+
+def test_snapshot_is_recomputed_after_the_window_expires(coord):
+    coord.system_status()
+    # Age the cache rather than sleeping.
+    coord._status_cache_at -= const.STATUS_CACHE_TTL * 2
+    connect(coord._mesh_clients[MESH_A])
+    assert coord.system_status()["meshes"]["connected"] == 1
+
+
+def test_the_cache_window_is_far_shorter_than_the_poll_interval(coord):
+    """The staleness this introduces must stay negligible against the
+    interval the integration already tolerates for connection state."""
+    assert const.STATUS_CACHE_TTL < const.POLL_INTERVAL / 100
+
+
+def test_connectivity_binary_sensor_does_not_read_through_the_cache(coord):
+    """is_on is the one signal worth having live, so it reads
+    connected_mesh_count directly rather than the memoised snapshot."""
+    sensor = bs.CyncBLEMeshConnectivitySensor(coord)
+    coord.system_status()          # prime the cache while disconnected
+    connect(coord._mesh_clients[MESH_A])
+    assert sensor.is_on is True    # reflects reality immediately
+
+
+# --------------------------------------------------------------------------
 # Entities
 # --------------------------------------------------------------------------
 

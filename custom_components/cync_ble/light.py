@@ -1,6 +1,7 @@
 """Light platform for Cync BLE integration."""
 import colorsys
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.light import (
@@ -112,26 +113,60 @@ class CyncBLELight(LightEntity):
         return attrs
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the light, then apply any requested attributes."""
-        # Power on first so subsequent attribute commands take effect
+        """Turn on the light, then apply any requested attributes.
+
+        NOTE: this is deliberately several sequential mesh writes, not one.
+        The Telink protocol has no combined command — power (0xD0),
+        luminance (0xD2) and colour/CT (0xE2) are separate opcodes — and
+        send_packet serialises them on _write_lock, so a turn-on that also
+        carries brightness and colour is three round-trips over BLE. On a
+        proxied or congested mesh that is visible as the bulb coming on at
+        its previous state and then correcting itself, rather than arriving
+        at the target directly.
+
+        The `steps` accounting below exists to make that measurable: enable
+        debug logging for this integration and the summary line reports how
+        many writes an action took and how long they took in total, with
+        per-write timings coming from send_packet.
+        """
+        started = time.monotonic()
+        steps: list[str] = []
+
+        # Power on first so subsequent attribute commands take effect.
+        # Whether this write is actually required when brightness is also
+        # being set is unverified: the Telink spec (AN-BLE-15120202-E3 §2.5)
+        # documents Set_Lum only as "set luminance" and says nothing about a
+        # power-on side effect, so dropping it needs testing against real
+        # bulbs rather than an assumption.
         if not self.is_on:
             if not await self._device.turn_on():
                 _LOGGER.error("Failed to turn on %s", self._device.name)
                 return
+            steps.append("power")
 
         if (brightness := kwargs.get(ATTR_BRIGHTNESS)) is not None:
             if not await self._device.set_brightness(brightness):
                 _LOGGER.error("Failed to set brightness on %s", self._device.name)
+            steps.append("brightness")
 
         if (color_temp_k := kwargs.get(ATTR_COLOR_TEMP_KELVIN)) is not None:
             if not await self._device.set_color_temp(color_temp_k):
                 _LOGGER.error("Failed to set color temperature on %s", self._device.name)
+            steps.append("color_temp")
 
         if (hs_color := kwargs.get(ATTR_HS_COLOR)) is not None:
             h, s = hs_color
             r, g, b = colorsys.hsv_to_rgb(h / 360, s / 100, 1.0)
             if not await self._device.set_rgb(int(r * 255), int(g * 255), int(b * 255)):
                 _LOGGER.error("Failed to set RGB color on %s", self._device.name)
+            steps.append("rgb")
+
+        if steps:
+            _LOGGER.debug(
+                "turn_on %s: %d mesh write(s) [%s] in %.0fms total",
+                self._device.name, len(steps), ", ".join(steps),
+                (time.monotonic() - started) * 1000,
+            )
 
         self.async_write_ha_state()
 

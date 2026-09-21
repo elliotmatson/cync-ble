@@ -694,11 +694,27 @@ class CyncMeshClient:
                     "Sending packet: target=0x%04X command=0x%02X data=%s wire=%s",
                     target, command, data, bytes(enc).hex(),
                 )
+                started = time.monotonic()
                 try:
                     await _write_gatt(client, CYNC_CONTROL_CHAR, bytes(enc))
+                    # Elapsed time is the useful half of this line. Each
+                    # high-level action can be several sequential writes (a
+                    # light turn-on with brightness and colour is three), and
+                    # they are serialised by _write_lock, so per-write
+                    # latency is what determines whether a bulb visibly
+                    # steps through its target state instead of arriving at
+                    # it. DEBUG only: this fires on every command, and this
+                    # integration has a history of log noise.
+                    _LOGGER.debug(
+                        "Packet write to target=0x%04X command=0x%02X took %.0fms",
+                        target, command, (time.monotonic() - started) * 1000,
+                    )
                     return True
                 except Exception as err:
-                    _LOGGER.warning("send_packet failed (attempt %d): %s", attempt + 1, err)
+                    _LOGGER.warning(
+                        "send_packet failed (attempt %d, after %.0fms): %s",
+                        attempt + 1, (time.monotonic() - started) * 1000, err,
+                    )
                     if not allow_reconnect:
                         continue
                     # A failed write is NOT proof the link is gone. Under proxy
