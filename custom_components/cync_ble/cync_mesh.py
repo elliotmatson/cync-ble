@@ -293,6 +293,57 @@ class CyncMeshClient:
             return False
         return time.monotonic() - self._disconnected_at < RECONNECT_GRACE_PERIOD
 
+    # ------------------------------------------------------------------
+    # Read-only accessors for diagnostics — so the system-status entities
+    # can report connection health without reaching into private state.
+    # ------------------------------------------------------------------
+
+    @property
+    def mesh_name(self) -> str:
+        return self._mesh_name
+
+    @property
+    def current_mac(self) -> Optional[str]:
+        """MAC of the bulb currently carrying this mesh's GATT session.
+
+        Worth surfacing: every command for the whole mesh is relayed through
+        this one node, so when a mesh is slow or flaky it matters which node
+        it happens to be routed through.
+        """
+        return self._current_mac if self._connected else None
+
+    @property
+    def mesh_macs(self) -> list[str]:
+        return list(self._mesh_macs)
+
+    def debug_state(self) -> dict[str, Any]:
+        """Snapshot of this client's connection health.
+
+        Reports the per-MAC failure bookkeeping that _connect_to_mac keeps,
+        which is otherwise invisible: a node in cooldown is being skipped on
+        every connect sweep, and that is exactly the kind of thing you want
+        to see when a mesh will not come back.
+        """
+        now = time.monotonic()
+        cooldowns = {
+            mac: round(until - now, 1)
+            for mac, until in self._mac_cooldown_until.items()
+            if until > now
+        }
+        return {
+            "connected": self.is_connected,
+            "connecting": self.is_connecting,
+            "recently_disconnected": self.recently_disconnected,
+            "active_mac": self.current_mac,
+            "known_macs": len(self._mesh_macs),
+            "macs_in_cooldown": cooldowns,
+            "mac_failure_counts": dict(self._mac_fail_counts),
+            "seconds_since_disconnect": (
+                None if self._disconnected_at is None or self.is_connected
+                else round(now - self._disconnected_at, 1)
+            ),
+        }
+
     async def connect(self, preferred_mac: Optional[str] = None) -> bool:
         """Attempt to connect to a mesh MAC.
 

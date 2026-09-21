@@ -70,6 +70,34 @@
       "cync_ble": {
         "name": "Cync BLE Light"
       }
+    },
+    "sensor": {
+      "connected_meshes": {
+        "name": "Connected meshes"
+      },
+      "available_devices": {
+        "name": "Available devices"
+      },
+      "unavailable_devices": {
+        "name": "Unavailable devices"
+      },
+      "quiet_devices": {
+        "name": "Quiet devices"
+      },
+      "unknown_devices": {
+        "name": "Unrecognized devices"
+      },
+      "firmware_known": {
+        "name": "Known firmware versions"
+      },
+      "last_activity": {
+        "name": "Last mesh activity"
+      }
+    },
+    "binary_sensor": {
+      "mesh_connectivity": {
+        "name": "Mesh connectivity"
+      }
     }
   },
   "issues": {
