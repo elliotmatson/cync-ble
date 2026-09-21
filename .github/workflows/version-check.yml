@@ -1,0 +1,37 @@
+name: Version check
+
+# HACS takes the version it shows users from the GitHub *release tag*, not
+# from manifest.json (which Home Assistant core requires separately). When
+# the two disagree, HACS and the integration's own device info report
+# different versions, which is worse than either being wrong on its own.
+# This fails the release if they drift.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check against manifest.json (e.g. v1.1.0)"
+        required: true
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare release tag to manifest.json version
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          MANIFEST_VERSION="$(python3 -c \
+            'import json;print(json.load(open("custom_components/cync_ble/manifest.json"))["version"])')"
+          # Tags are conventionally prefixed with "v"; manifest versions are not.
+          TAG_VERSION="${TAG#v}"
+          echo "release tag       : $TAG  (normalised: $TAG_VERSION)"
+          echo "manifest.json     : $MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Release tag '$TAG' does not match manifest.json version '$MANIFEST_VERSION'. Bump manifest.json and re-tag, or retag the release."
+            exit 1
+          fi
+          echo "✓ versions agree"
