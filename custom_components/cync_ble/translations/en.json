@@ -60,5 +60,35 @@
       "title": "Unrecognized Cync devices on your mesh",
       "description": "{count} device(s) are reporting status on your Cync mesh but are not in this integration's device list: {devices}.\n\nThis usually means they were paired in the Cync app after the integration was set up. Use **Reconfigure** on the Cync BLE integration to re-sync your device list and add them.\n\nThis notice clears itself once the re-sync completes."
     }
+  },
+  "entity": {
+    "sensor": {
+      "connected_meshes": {
+        "name": "Connected meshes"
+      },
+      "available_devices": {
+        "name": "Available devices"
+      },
+      "unavailable_devices": {
+        "name": "Unavailable devices"
+      },
+      "quiet_devices": {
+        "name": "Quiet devices"
+      },
+      "unknown_devices": {
+        "name": "Unrecognized devices"
+      },
+      "firmware_known": {
+        "name": "Known firmware versions"
+      },
+      "last_activity": {
+        "name": "Last mesh activity"
+      }
+    },
+    "binary_sensor": {
+      "mesh_connectivity": {
+        "name": "Mesh connectivity"
+      }
+    }
   }
 }

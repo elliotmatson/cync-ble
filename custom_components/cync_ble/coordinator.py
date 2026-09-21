@@ -16,6 +16,7 @@ from homeassistant.components.bluetooth import (
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -81,6 +82,13 @@ class CyncBLEDevice:
         # connection being up). None until the first one arrives — mirrors
         # cync2mqtt seeding every device "offline" until it reports in.
         self.last_seen: Optional[float] = None
+        # Wall-clock companion to last_seen, for display only. The two are
+        # kept separately on purpose: monotonic time is correct for the
+        # interval math that drives probing and availability (it can't jump
+        # when the system clock is adjusted or NTP steps), but it isn't a
+        # real timestamp and can't be shown to a user. This one is only ever
+        # rendered, never compared against a threshold.
+        self.last_seen_utc: Optional[Any] = None
 
         # Liveness-probe state (see probe_if_quiet) — a device that's gone
         # quiet under the push-on-change protocol isn't necessarily gone,
@@ -156,6 +164,36 @@ class CyncBLEDevice:
             return False
         return self._mesh_client.is_connected or self._mesh_client.recently_disconnected
 
+    @property
+    def unavailable_reason(self) -> Optional[str]:
+        """Why this device is unavailable, or None if it isn't.
+
+        is_available folds three genuinely different situations into one
+        boolean, and they call for different fixes: a device that has never
+        reported is probably misconfigured or out of range, one that failed
+        repeated probes is likely powered off, and one whose mesh is down is
+        not the device's fault at all. Keeping them apart is most of the
+        value of a diagnostic entity.
+        """
+        if self._confirmed_unreachable:
+            return "probe_failed"
+        if self.last_seen is None:
+            return "never_reported"
+        if not (self._mesh_client.is_connected
+                or self._mesh_client.recently_disconnected):
+            return "mesh_disconnected"
+        return None
+
+    @property
+    def probe_miss_count(self) -> int:
+        return self._probe_miss_count
+
+    @property
+    def seconds_since_seen(self) -> Optional[float]:
+        if self.last_seen is None:
+            return None
+        return round(time.monotonic() - self.last_seen, 1)
+
     def _clear_probe_state(self) -> None:
         self._probe_miss_count = 0
         self._confirmed_unreachable = False
@@ -164,6 +202,7 @@ class CyncBLEDevice:
         """Record a liveness confirmation that isn't a full status update —
         i.e. a successful probe reply (see probe_if_quiet)."""
         self.last_seen = time.monotonic()
+        self.last_seen_utc = dt_util.utcnow()
         self._clear_probe_state()
 
     def update_from_version(self, version: Optional[str], raw: str) -> None:
@@ -213,6 +252,7 @@ class CyncBLEDevice:
     def update_from_status(self, status: DeviceStatus) -> None:
         """Update state from a mesh notification."""
         self.last_seen = time.monotonic()
+        self.last_seen_utc = dt_util.utcnow()
         self._clear_probe_state()
         # mesh brightness is 0–100; convert to 0–255
         self._brightness = _mesh_brightness_to_ha(status.brightness)
@@ -701,6 +741,112 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             "meshes_queried": queried,
             "meshes_failed": failed,
             "meshes_not_connected": skipped,
+        }
+
+    @property
+    def entry_id(self) -> Optional[str]:
+        return self._entry_id
+
+    @property
+    def mesh_count(self) -> int:
+        return len(self._mesh_clients)
+
+    @property
+    def connected_mesh_count(self) -> int:
+        return sum(1 for c in self._mesh_clients.values() if c.is_connected)
+
+    @property
+    def unknown_device_keys(self) -> list[str]:
+        """Device keys seen on the mesh but absent from the config entry.
+
+        The same set that drives the unknown_devices repair issue — exposed
+        so the system-status entity can show the count without the user
+        having to notice the repair card.
+        """
+        return sorted(self._unknown_device_keys)
+
+    def system_status(self) -> dict[str, Any]:
+        """Aggregate health snapshot, backing the system-status entities.
+
+        Built here rather than in the entities so there is one definition of
+        each metric, and so the per-mesh and per-device breakdowns come from
+        the same pass — a summary whose counts disagree with its own detail
+        lists is worse than no summary.
+        """
+        now = time.monotonic()
+
+        meshes: dict[str, Any] = {
+            mesh_name: client.debug_state()
+            for mesh_name, client in self._mesh_clients.items()
+        }
+
+        # Group unavailable devices by *why*, not just how many. See
+        # CyncBLEDevice.unavailable_reason.
+        by_reason: dict[str, list[str]] = {}
+        quiet: list[dict[str, Any]] = []
+        firmware: dict[str, Optional[str]] = {}
+        available = 0
+
+        for key, device in self._devices.items():
+            if device.is_available:
+                available += 1
+            reason = device.unavailable_reason
+            if reason is not None:
+                by_reason.setdefault(reason, []).append(device.name)
+
+            # A device that is nominally available but has been silent past
+            # the probe threshold is the interesting middle case: still
+            # believed up, but the push-on-change protocol means silence
+            # alone isn't proof either way.
+            if device.last_seen is not None:
+                age = now - device.last_seen
+                if age >= PROBE_QUIET_THRESHOLD:
+                    quiet.append({
+                        "name": device.name,
+                        "seconds_since_seen": round(age, 1),
+                        "probe_misses": device.probe_miss_count,
+                    })
+
+            if device.firmware_version_raw is not None:
+                firmware[device.name] = device.firmware_version
+
+        quiet.sort(key=lambda d: -d["seconds_since_seen"])
+        for names in by_reason.values():
+            names.sort()
+
+        # Most recent status notification across every device — if this
+        # stops advancing while meshes report connected, the GATT session is
+        # up but nothing is actually coming through it.
+        seen = [d.last_seen_utc for d in self._devices.values() if d.last_seen_utc]
+        last_activity = max(seen) if seen else None
+
+        return {
+            "meshes": {
+                "total": len(self._mesh_clients),
+                "connected": self.connected_mesh_count,
+                "connecting": sum(
+                    1 for c in self._mesh_clients.values() if c.is_connecting
+                ),
+                "detail": meshes,
+            },
+            "devices": {
+                "total": len(self._devices),
+                "available": available,
+                "unavailable": len(self._devices) - available,
+                "unavailable_by_reason": {k: len(v) for k, v in by_reason.items()},
+                "unavailable_detail": by_reason,
+                "quiet": quiet,
+            },
+            "unknown_devices": {
+                "count": len(self._unknown_device_keys),
+                "keys": self.unknown_device_keys,
+            },
+            "firmware": {
+                "known": len(firmware),
+                "total": len(self._devices),
+                "versions": firmware,
+            },
+            "last_activity": last_activity,
         }
 
     def get_device(self, key: str) -> Optional[CyncBLEDevice]:

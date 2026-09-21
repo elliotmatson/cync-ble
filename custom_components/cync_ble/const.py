@@ -2,7 +2,8 @@
 from typing import Final
 
 DOMAIN: Final = "cync_ble"
-PLATFORMS: Final = ["light", "switch", "fan"]
+# binary_sensor/sensor carry the system-status diagnostics (see entity.py)
+PLATFORMS: Final = ["light", "switch", "fan", "binary_sensor", "sensor"]
 
 # Cloud API endpoints (GE Lighting / Cync) — verified from cync2mqtt reference
 CYNC_CLOUD_URL: Final = "https://api.gelighting.com"
