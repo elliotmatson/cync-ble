@@ -4,19 +4,18 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
-    DOMAIN,
-    PLATFORMS,
     CONF_DEVICES,
+    DOMAIN,
     FIRMWARE_QUERY_WINDOW,
-    FIRMWARE_QUERY_WINDOW_MIN,
     FIRMWARE_QUERY_WINDOW_MAX,
+    FIRMWARE_QUERY_WINDOW_MIN,
+    PLATFORMS,
 )
 from .coordinator import CyncBLECoordinator
 
@@ -37,10 +36,12 @@ SERVICE_QUERY_FIRMWARE_VERSIONS_SCHEMA = vol.Schema(
 # Type alias so platforms can annotate entry.runtime_data correctly
 type CyncBLEConfigEntry = ConfigEntry[CyncBLECoordinator]
 
-
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the Cync BLE integration."""
-    return True
+# This integration is set up exclusively through its config flow; there is no
+# YAML configuration for it. Declaring that explicitly makes Home Assistant
+# reject a `cync_ble:` block with a clear message instead of accepting and
+# silently ignoring it, and satisfies hassfest's CONFIG_SCHEMA check. It also
+# replaces the previous no-op async_setup, which existed only to return True.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 def _async_register_services(hass: HomeAssistant) -> None:

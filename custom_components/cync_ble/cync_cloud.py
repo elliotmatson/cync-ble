@@ -13,18 +13,18 @@ actually spending a request.
 import logging
 import random
 import string
-from typing import Optional, Any
+from typing import Any, Optional
 
 import aiohttp
 
 from .const import (
-    CYNC_CLOUD_URL,
-    CYNC_OTP_PATH,
-    CYNC_AUTH_PATH,
-    CYNC_DEVICES_PATH,
-    CYNC_PROPERTIES_PATH,
-    CYNC_CORP_ID,
     CLOUD_TIMEOUT,
+    CYNC_AUTH_PATH,
+    CYNC_CLOUD_URL,
+    CYNC_CORP_ID,
+    CYNC_DEVICES_PATH,
+    CYNC_OTP_PATH,
+    CYNC_PROPERTIES_PATH,
 )
 
 _LOGGER = logging.getLogger(__name__)

@@ -1,0 +1,13 @@
+# Test dependencies.
+#
+# pycryptodome is NOT stubbed: the mesh tests run real AES through
+# _decrypt_packet so the packet round-trip they assert is the actual one,
+# not a mock of it. It is also a real runtime requirement of the
+# integration (see manifest.json).
+pycryptodome>=3.0.0
+
+pytest>=8.0
+ruff>=0.6
+
+# services.yaml and the workflow files are parse-checked in tests.
+PyYAML>=6.0

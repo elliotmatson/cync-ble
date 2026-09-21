@@ -19,18 +19,17 @@ import logging
 from typing import Any, Optional
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
-    DOMAIN,
+    CONF_DEVICES,
     CONF_EMAIL,
     CONF_PASSWORD,
-    CONF_SESSION_TOKEN,
-    CONF_DEVICES,
-    CONF_USER_ID,
     CONF_REMOVE_MISSING,
+    CONF_SESSION_TOKEN,
+    CONF_USER_ID,
+    DOMAIN,
 )
 from .cync_cloud import CyncCloudClient
 from .device_sync import apply_diff, diff_devices, has_changes, summarize

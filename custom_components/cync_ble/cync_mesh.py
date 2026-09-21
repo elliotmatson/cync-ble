@@ -23,35 +23,34 @@ import logging
 import random
 import time
 from collections import namedtuple
-from typing import Callable, Optional, Any, Sequence
-
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
+from typing import Any, Callable, Optional, Sequence
 
 from bleak_retry_connector import establish_connection
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
 from homeassistant.components.bluetooth import async_ble_device_from_address
 
 from .const import (
-    CYNC_NOTIFY_CHAR,
-    CYNC_CONTROL_CHAR,
-    CYNC_PAIRING_CHAR,
-    CYNC_VENDOR,
-    CMD_POWER,
+    BLE_TIMEOUT,
     CMD_BRIGHTNESS,
     CMD_COLOR,
     CMD_COLOR_TEMP_SUBCMD,
-    CMD_RGB_SUBCMD,
-    CMD_STATUS_RESPONSE,
-    CMD_STATUS_QUERY,
-    CMD_STATUS_QUERY_RESPONSE,
     CMD_MESH_OTA,
     CMD_MESH_OTA_READ_RSP,
+    CMD_POWER,
+    CMD_RGB_SUBCMD,
+    CMD_STATUS_QUERY,
+    CMD_STATUS_QUERY_RESPONSE,
+    CMD_STATUS_RESPONSE,
+    CYNC_CONTROL_CHAR,
+    CYNC_NOTIFY_CHAR,
+    CYNC_PAIRING_CHAR,
+    CYNC_VENDOR,
+    FIRMWARE_QUERY_WINDOW,
+    MAC_COOLDOWN_SECONDS,
+    MAC_FAIL_THRESHOLD,
     MESH_OTA_SELECTOR_READ,
     MESH_OTA_SUB_GET_VERSION,
-    FIRMWARE_QUERY_WINDOW,
-    BLE_TIMEOUT,
-    MAC_FAIL_THRESHOLD,
-    MAC_COOLDOWN_SECONDS,
     PROBE_TIMEOUT,
     RECONNECT_GRACE_PERIOD,
 )
@@ -145,17 +144,20 @@ def _aes_encrypt(key: list[int], data: list[int]) -> list[int]:
 
 
 def _generate_sk(name: str, password: str, data1: list[int], data2: list[int]) -> list[int]:
-    # ljust pads but does NOT truncate — always slice to 16 so AES always gets 16 bytes
+    # ljust pads but does NOT truncate — always slice to 16 so AES always gets 16 bytes.
+    # The zip below is strict=True because of this: both operands are exactly 16
+    # here, and a silent truncation would derive a wrong session key, which shows
+    # up as an unexplained pairing failure rather than as an error.
     name = name.ljust(16, "\x00")[:16]
     password = password.ljust(16, "\x00")[:16]
-    key = [ord(a) ^ ord(b) for a, b in zip(name, password)]
+    key = [ord(a) ^ ord(b) for a, b in zip(name, password, strict=True)]
     return _aes_encrypt(key, data1[0:8] + data2[0:8])
 
 
 def _key_encrypt(name: str, password: str, key: list[int]) -> list[int]:
     name = name.ljust(16, "\x00")[:16]
     password = password.ljust(16, "\x00")[:16]
-    data = [ord(a) ^ ord(b) for a, b in zip(name, password)]
+    data = [ord(a) ^ ord(b) for a, b in zip(name, password, strict=True)]
     return _aes_encrypt(key, data)
 
 
