@@ -25,8 +25,9 @@ from .const import (
     PROBE_QUIET_THRESHOLD,
     PROBE_INTERVAL,
     PROBE_MISS_THRESHOLD,
+    FIRMWARE_QUERY_WINDOW,
 )
-from .cync_mesh import CyncMeshClient, DeviceStatus
+from .cync_mesh import CyncMeshClient, DeviceStatus, DeviceVersion
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -86,6 +87,19 @@ class CyncBLEDevice:
         self._probe_miss_count: int = 0
         self._last_probe_attempt: Optional[float] = None
         self._confirmed_unreachable: bool = False
+
+        # Firmware version, populated only by an explicit
+        # query_firmware_versions run — nothing reports it unsolicited. Both
+        # stay None until this device answers one. firmware_version is the
+        # best-effort decode and can stay None even after a reply arrives;
+        # firmware_version_raw is the hex of the reply's parameter bytes and
+        # is the authoritative record, because the reply opcode and payload
+        # layout are inferred rather than documented (see
+        # cync_mesh.decode_firmware_version). A reply having been received at
+        # all is therefore signalled by firmware_version_raw, not by
+        # firmware_version.
+        self.firmware_version: Optional[str] = None
+        self.firmware_version_raw: Optional[str] = None
 
     # ------------------------------------------------------------------
     # State properties (HA units)
@@ -149,6 +163,28 @@ class CyncBLEDevice:
         i.e. a successful probe reply (see probe_if_quiet)."""
         self.last_seen = time.monotonic()
         self._clear_probe_state()
+
+    def update_from_version(self, version: Optional[str], raw: str) -> None:
+        """Record a firmware version reply (see CyncMeshClient.query_firmware_versions).
+
+        Also marks the device seen: the query is a directed read and
+        answering it is liveness evidence exactly like a probe reply is, so a
+        device that reports its firmware shouldn't keep accumulating probe
+        misses toward _confirmed_unreachable.
+        """
+        self.firmware_version = version
+        self.firmware_version_raw = raw
+        self.mark_seen()
+
+    def clear_firmware_version(self) -> None:
+        """Forget a previously collected firmware version.
+
+        Called before a fresh query so a device that has since gone silent
+        reads as unanswered rather than reporting a stale value from an
+        earlier run — "which bulbs stayed silent" is half the signal.
+        """
+        self.firmware_version = None
+        self.firmware_version_raw = None
 
     async def probe_if_quiet(self) -> None:
         """Send a direct liveness probe (opcode 0xDA) if this device has
@@ -285,6 +321,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                 mesh_password=info["access_key"],
                 mesh_macs=info["macs"],
                 status_callback=self._on_device_status,
+                version_callback=self._on_device_version,
             )
             for mesh_name, info in mesh_info.items()
         }
@@ -410,6 +447,26 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         self._log_device_availability_edge(key, device)
         self.async_update_listeners()
 
+    async def _on_device_version(self, version: DeviceVersion) -> None:
+        """Route a firmware version reply to the device that sent it."""
+        key = f"{version.mesh_name}/{version.device_id}"
+        device = self._devices.get(key)
+        if device is None:
+            # DEBUG, not WARNING. We just broadcast this query to 0xFFFF, so
+            # hearing back from a device that isn't in the configured list is
+            # an expected outcome of asking rather than an anomaly — and
+            # _on_device_status already warns about unrecognized devices
+            # separately, so warning again here would only duplicate it once
+            # per query run.
+            _LOGGER.debug(
+                "Firmware version reply from unconfigured device %s: version=%s raw=%s",
+                key, version.version, version.raw,
+            )
+            return
+        device.update_from_version(version.version, version.raw)
+        self._log_device_availability_edge(key, device)
+        self.async_update_listeners()
+
     # ------------------------------------------------------------------
     # DataUpdateCoordinator poll (connect if needed; BLE is push-based)
     # ------------------------------------------------------------------
@@ -485,6 +542,96 @@ class CyncBLECoordinator(DataUpdateCoordinator):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def async_query_firmware_versions(
+        self, window: float = FIRMWARE_QUERY_WINDOW
+    ) -> dict[str, Any]:
+        """Ask every connected mesh to report its devices' firmware versions.
+
+        Groundwork for OTA support, not OTA itself: this only reads.
+
+        Prior results are cleared first, so a device that answered a previous
+        run but stays silent this time reads as unanswered rather than
+        reporting a stale value.
+
+        The returned summary deliberately includes devices that did NOT
+        answer. On a congested mesh a broadcast read is lossy, and "which
+        bulbs stayed silent" is half the signal — a list of only the
+        responders would look like a clean result while quietly hiding the
+        devices you most wanted to know about.
+
+        Note that the reply opcode and payload layout this depends on are
+        inferred rather than documented (see cync_mesh.decode_firmware_version),
+        so `version` may be None while `version_raw` is populated. Every
+        reply is also logged at INFO with its raw bytes.
+        """
+        connected = {
+            mesh_name: client
+            for mesh_name, client in self._mesh_clients.items()
+            if client.is_connected
+        }
+        skipped = [mn for mn in self._mesh_clients if mn not in connected]
+
+        for device in self._devices.values():
+            device.clear_firmware_version()
+
+        # Query all connected meshes concurrently — each one sleeps for the
+        # full collection window, so doing them in series would multiply the
+        # service call's duration by the number of meshes for no benefit.
+        # return_exceptions=True so one mesh failing still lets the rest
+        # report; a raised exception is treated the same as a failed send.
+        results = await asyncio.gather(
+            *(client.query_firmware_versions(window) for client in connected.values()),
+            return_exceptions=True,
+        )
+
+        queried: list[str] = []
+        failed: list[str] = []
+        for mesh_name, result in zip(connected, results):
+            if isinstance(result, BaseException):
+                _LOGGER.warning(
+                    "Firmware version query failed on mesh %s: %s", mesh_name, result
+                )
+                failed.append(mesh_name)
+            elif result:
+                queried.append(mesh_name)
+            else:
+                failed.append(mesh_name)
+
+        devices: list[dict[str, Any]] = []
+        for key, device in self._devices.items():
+            # firmware_version_raw, not firmware_version, is what says a
+            # reply arrived — an undecodable payload is still a reply.
+            responded = device.firmware_version_raw is not None
+            devices.append({
+                "key": key,
+                "name": device.name,
+                "mac": device.mac_address,
+                "mesh_name": device.mesh_name,
+                "device_id": device.device_id,
+                "responded": responded,
+                "firmware_version": device.firmware_version,
+                "firmware_version_raw": device.firmware_version_raw,
+            })
+        devices.sort(key=lambda d: (not d["responded"], d["name"]))
+
+        responded_count = sum(1 for d in devices if d["responded"])
+        _LOGGER.info(
+            "Firmware version query: %d of %d devices answered within %ss "
+            "(%d mesh(es) queried, %d failed, %d not connected)",
+            responded_count, len(devices), window,
+            len(queried), len(failed), len(skipped),
+        )
+
+        return {
+            "devices": devices,
+            "responded": responded_count,
+            "total": len(devices),
+            "window": window,
+            "meshes_queried": queried,
+            "meshes_failed": failed,
+            "meshes_not_connected": skipped,
+        }
 
     def get_device(self, key: str) -> Optional[CyncBLEDevice]:
         return self._devices.get(key)

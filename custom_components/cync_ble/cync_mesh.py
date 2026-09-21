@@ -13,6 +13,8 @@ Key facts:
 - Vendor ID for Cync: 0x0211
 - Commands: 0xD0 (power), 0xD2 (brightness), 0xE2 (color/CT)
 - Status notifications: opcode 0xDC
+- Mesh-OTA firmware version read: opcode 0xC7 out, 0xC8 back (the reply
+  opcode is inferred, not documented — see const.CMD_MESH_OTA_READ_RSP)
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ import logging
 import random
 import time
 from collections import namedtuple
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Sequence
 
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
@@ -42,6 +44,11 @@ from .const import (
     CMD_STATUS_RESPONSE,
     CMD_STATUS_QUERY,
     CMD_STATUS_QUERY_RESPONSE,
+    CMD_MESH_OTA,
+    CMD_MESH_OTA_READ_RSP,
+    MESH_OTA_SELECTOR_READ,
+    MESH_OTA_SUB_GET_VERSION,
+    FIRMWARE_QUERY_WINDOW,
     BLE_TIMEOUT,
     MAC_FAIL_THRESHOLD,
     MAC_COOLDOWN_SECONDS,
@@ -55,6 +62,77 @@ DeviceStatus = namedtuple(
     "DeviceStatus",
     ["mesh_name", "device_id", "brightness", "is_rgb", "red", "green", "blue", "color_temp"],
 )
+
+# A firmware version reported by one device in response to the mesh-OTA read
+# broadcast. `version` is the best-effort decode and may be None; `raw` is the
+# hex of the reply's parameter bytes and is ALWAYS populated — see
+# decode_firmware_version for why the raw form is the part to trust.
+DeviceVersion = namedtuple("DeviceVersion", ["mesh_name", "device_id", "version", "raw"])
+
+
+def decode_firmware_version(params: Sequence[int]) -> Optional[str]:
+    """Best-effort decode of the parameter bytes of a mesh-OTA read reply.
+
+    This decoder is deliberately forgiving rather than assertive, because the
+    layout it is decoding is NOT documented anywhere we have. The Telink
+    Android SDK manual (AN-17071702-E1 §5) documents only the outbound 0xC7
+    request and says the version "will be available via analysis" in the
+    notification event — it never states the reply opcode, the field offsets,
+    or the encoding. See CMD_MESH_OTA_READ_RSP in const.py.
+
+    So we recognise the two shapes Telink firmware is known to use elsewhere
+    and refuse to guess at anything else:
+
+      * ASCII text   — b"V1.2"        -> "V1.2"
+      * packed bytes — [0x01, 0x02]   -> "1.2"
+
+    Both 0x00 and 0xFF are stripped as padding: 0x00 is the documented filler
+    for the reserved tail of a notify payload, and 0xFF is what erased flash
+    reads back as, so a short version in a fixed-width field can arrive padded
+    with either.
+
+    Returns None — not a guess — when the payload matches neither shape. An
+    all-whitespace ASCII payload is padding in disguise and also returns None.
+    The caller keeps the raw hex regardless, which is the evidence that lets
+    this function be corrected against real hardware.
+    """
+    # Copy into an immutable bytes() rather than working on the argument:
+    # callers pass a slice of the live decrypted packet list and must not have
+    # it mutated underneath them.
+    raw = bytes(b & 0xFF for b in params)
+
+    trimmed = raw.strip(b"\x00\xff")
+    if not trimmed:
+        return None
+
+    # ASCII first: a printable payload is unambiguous, whereas the packed form
+    # can collide with printable bytes (0x31 is both the digit "1" and the
+    # number 49), and firmware that bothers to send text means it as text.
+    #
+    # ASCII whitespace counts as part of the text shape, not just 0x20. If it
+    # didn't, a payload of spaces plus a tab would fail the printable test,
+    # fall through to the packed branch and be rendered as "32.32.9" — a
+    # confident-looking version invented out of padding, which is exactly the
+    # kind of guess this decoder must not make.
+    #
+    # Whitespace is deliberately NOT stripped as padding up front the way
+    # 0x00/0xFF are: the whitespace byte values overlap real packed version
+    # components (0x0A is both "\n" and the number 10), so stripping them
+    # first would silently turn a packed "1.10" into "1". Classifying the
+    # shape before stripping keeps the two cases apart.
+    if all(0x20 <= b <= 0x7E or 0x09 <= b <= 0x0D for b in trimmed):
+        text = trimmed.decode("ascii").strip()
+        # All-whitespace is padding in disguise.
+        return text or None
+
+    # Packed: one byte per version component. Bounded at 4 components and at
+    # 99 per component so arbitrary binary garbage — which is exactly what a
+    # wrong opcode inference would hand us — reads as unrecognised rather than
+    # being rendered as a plausible-looking version string.
+    if 2 <= len(trimmed) <= 4 and all(b <= 99 for b in trimmed):
+        return ".".join(str(b) for b in trimmed)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +230,7 @@ class CyncMeshClient:
         mesh_password: str,
         mesh_macs: list[str],
         status_callback: Optional[Callable[[DeviceStatus], Any]] = None,
+        version_callback: Optional[Callable[[DeviceVersion], Any]] = None,
     ) -> None:
         self._hass = hass
         # Strip colons/dashes so the AES key derivation matches what the bulb expects.
@@ -162,6 +241,7 @@ class CyncMeshClient:
         self._mesh_password = mesh_password  # access_key string from cloud API
         self._mesh_macs = mesh_macs          # list of bulb MAC addresses
         self._status_callback = status_callback
+        self._version_callback = version_callback
 
         self._client = None
         self._sk: Optional[list[int]] = None
@@ -429,6 +509,9 @@ class CyncMeshClient:
             if self._probe_reply_event is not None:
                 self._probe_reply_event.set()
             return
+        if pkt[7] == CMD_MESH_OTA_READ_RSP:
+            await self._handle_version_reply(pkt)
+            return
         if pkt[7] != CMD_STATUS_RESPONSE:
             return
 
@@ -466,6 +549,51 @@ class CyncMeshClient:
                     await self._status_callback(status)
                 except Exception as err:
                     _LOGGER.error("Status callback error: %s", err)
+
+    async def _handle_version_reply(self, pkt: list[int]) -> None:
+        """Handle a mesh-OTA read reply (see CMD_MESH_OTA_READ_RSP).
+
+        Unlike the 0xDC status broadcast — which packs two device slots into
+        the payload and carries the device id inside each slot — this reply
+        identifies its sender with the packet's own source-address field.
+        That is bytes [4:5] of the notify frame in Telink's numbering, i.e.
+        pkt[3:5] here, little-endian: the same field the Device_Addr 0xE1
+        notify uses to report which light answered (AN-BLE-15120202-E3
+        §2.13, Table 14 — "Source addr is 0x0011" shown on the wire as
+        `11 00`).
+
+        The parameter bytes are pkt[10:20] — [11:20] in the doc's 1-indexed
+        numbering, the same parameter region every other command uses.
+
+        Every reply is logged at INFO *with its raw parameter bytes*, not
+        just the decode. Both the reply opcode and this payload layout are
+        inferred rather than documented, so these log lines are the only
+        evidence available for confirming or correcting them against real
+        Cync hardware — they are the point of the feature as much as the
+        decoded value is.
+        """
+        device_id = pkt[3] | (pkt[4] << 8)
+        params = pkt[10:20]
+        raw = bytes(params).hex()
+        version = decode_firmware_version(params)
+
+        _LOGGER.info(
+            "Firmware version reply from mesh %s device %d: version=%s raw=%s",
+            self._mesh_name, device_id, version if version is not None else "<undecoded>", raw,
+        )
+
+        if self._version_callback:
+            try:
+                await self._version_callback(
+                    DeviceVersion(
+                        mesh_name=self._mesh_name,
+                        device_id=device_id,
+                        version=version,
+                        raw=raw,
+                    )
+                )
+            except Exception as err:
+                _LOGGER.error("Version callback error: %s", err)
 
     async def send_packet(
         self, target: int, command: int, data: list[int], *, allow_reconnect: bool = True
@@ -593,6 +721,45 @@ class CyncMeshClient:
                 return False
         finally:
             self._probe_reply_event = None
+
+    async def query_firmware_versions(
+        self, window: float = FIRMWARE_QUERY_WINDOW
+    ) -> bool:
+        """Broadcast the mesh-OTA firmware version read and collect replies.
+
+        Sends opcode 0xC7 to 0xFFFF with params [0x20, 0x00], which the
+        Telink Android SDK manual (AN-17071702-E1 §5 "OTA/MeshOTA") describes
+        as how the app collects every device's firmware version before
+        starting a MeshOTA. Replies land on the 1911 notify characteristic and
+        are dispatched by _handle_version_reply via version_callback.
+
+        allow_reconnect=False for the same reason request_status uses it:
+        this is a diagnostic read, and a failed write on it must not be able
+        to tear down a live mesh session and force a full re-pair handshake
+        back through whatever congested proxy just dropped the write.
+
+        There is no reply count to await — a 0xFFFF broadcast does not tell us
+        how many devices will answer, and on a congested mesh some never will
+        — so this simply sleeps for the collection window and lets the
+        callback accumulate whatever arrives.
+
+        Returns whether the query was SENT, not what came back. Which devices
+        answered is the caller's to read off the collected results; see
+        CyncBLECoordinator.async_query_firmware_versions.
+        """
+        sent = await self.send_packet(
+            0xFFFF,
+            CMD_MESH_OTA,
+            [MESH_OTA_SELECTOR_READ, MESH_OTA_SUB_GET_VERSION],
+            allow_reconnect=False,
+        )
+        if not sent:
+            _LOGGER.debug(
+                "Firmware version query not sent on mesh %s — write failed", self._mesh_name
+            )
+            return False
+        await asyncio.sleep(window)
+        return True
 
     # ------------------------------------------------------------------
     # High-level device commands
