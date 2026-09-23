@@ -132,6 +132,30 @@ POLL_INTERVAL: Final = 60
 # which the rest of the integration already tolerates for connection state.
 STATUS_CACHE_TTL: Final = 0.05
 
+# Consecutive failed writes on one GATT session — counted across ALL callers,
+# not per send_packet call — before that session is treated as wedged and torn
+# down. A timed-out write is only cancelled on our side: the ATT request is
+# still outstanding in the proxy and the bulb, and a link allows one at a
+# time, so every write queued behind it times out too. That is the exact
+# 8.0s-cadence run of timeouts seen before full mesh drops. One timeout on its
+# own can still be a merely slow proxy (see BLE_TIMEOUT), so the first is
+# tolerated; the second in a row is not.
+LINK_STALL_THRESHOLD: Final = 2
+
+# Minimum spacing between consecutive mesh writes. The connected bulb has to
+# re-broadcast every command into the mesh (8 repeats by default, per the
+# Telink SDK manual §6.5.2) and a burst of back-to-back writes — e.g. Adaptive
+# Lighting updating twenty bulbs at once — outruns it. Small enough to be
+# invisible on a single command; mostly matters for bursts.
+WRITE_MIN_GAP: Final = 0.05
+
+# Liveness probes (see CyncBLEDevice.probe_if_quiet) are held off while any
+# light/switch/fan command is queued or has finished within this many
+# seconds. Probes are diagnostic and share the single GATT link with user
+# commands; competing with a burst of them just adds to the congestion that
+# causes the drops probes would then report.
+COMMAND_QUIET_PERIOD: Final = 30
+
 # Max simultaneous BLE connection attempts across all meshes.
 # Telink mesh routing means 1 connection per mesh is sufficient;
 # this cap prevents flooding proxy slots during reconnect storms.

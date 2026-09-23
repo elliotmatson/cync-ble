@@ -42,17 +42,20 @@ from .const import (
     CMD_STATUS_QUERY,
     CMD_STATUS_QUERY_RESPONSE,
     CMD_STATUS_RESPONSE,
+    COMMAND_QUIET_PERIOD,
     CYNC_CONTROL_CHAR,
     CYNC_NOTIFY_CHAR,
     CYNC_PAIRING_CHAR,
     CYNC_VENDOR,
     FIRMWARE_QUERY_WINDOW,
+    LINK_STALL_THRESHOLD,
     MAC_COOLDOWN_SECONDS,
     MAC_FAIL_THRESHOLD,
     MESH_OTA_SELECTOR_READ,
     MESH_OTA_SUB_GET_VERSION,
     PROBE_TIMEOUT,
     RECONNECT_GRACE_PERIOD,
+    WRITE_MIN_GAP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -276,9 +279,39 @@ class CyncMeshClient:
         self._mac_fail_counts: dict[str, int] = {}
         self._mac_cooldown_until: dict[str, float] = {}
 
+        # Failed writes in a row on the current session, across every caller
+        # — see LINK_STALL_THRESHOLD. Per-call retry counting can't see a
+        # wedged link: each queued command gets its own fresh budget, so
+        # twenty queued commands used to mean twenty sequential timeouts.
+        self._consecutive_write_failures: int = 0
+        # Monotonic time the last write finished, for WRITE_MIN_GAP pacing.
+        self._last_write_at: float = 0.0
+
+        # Latest-wins coalescing for user commands — see _send_command. Maps
+        # (target, opcode) to a generation counter; a queued write whose
+        # generation is no longer current has been superseded and is dropped.
+        self._command_generation: dict[tuple[int, int], int] = {}
+        # User commands queued or in flight, and when the last one was
+        # issued or finished — backs is_busy, which holds off probes.
+        self._pending_commands: int = 0
+        self._last_command_at: Optional[float] = None
+
     @property
     def is_connected(self) -> bool:
         return self._connected and self._sk is not None
+
+    @property
+    def is_busy(self) -> bool:
+        """True while user commands are queued, or finished within
+        COMMAND_QUIET_PERIOD. Liveness probes defer to this — see
+        CyncBLEDevice.probe_if_quiet.
+        """
+        if self._pending_commands > 0:
+            return True
+        return (
+            self._last_command_at is not None
+            and time.monotonic() - self._last_command_at < COMMAND_QUIET_PERIOD
+        )
 
     @property
     def is_connecting(self) -> bool:
@@ -340,6 +373,8 @@ class CyncMeshClient:
             "known_macs": len(self._mesh_macs),
             "macs_in_cooldown": cooldowns,
             "mac_failure_counts": dict(self._mac_fail_counts),
+            "pending_commands": self._pending_commands,
+            "consecutive_write_failures": self._consecutive_write_failures,
             "seconds_since_disconnect": (
                 None if self._disconnected_at is None or self.is_connected
                 else round(now - self._disconnected_at, 1)
@@ -488,6 +523,7 @@ class CyncMeshClient:
 
             self._connected = True
             self._disconnected_at = None
+            self._consecutive_write_failures = 0
             self._record_mac_success(mac)
             _LOGGER.info("Connected to Cync mesh via %s", mac)
 
@@ -532,8 +568,34 @@ class CyncMeshClient:
             except Exception:
                 pass
 
-    def _on_disconnected(self, _client: Any) -> None:
-        """Bleak disconnect callback — invoked synchronously, cannot await."""
+    def _on_disconnected(self, client: Any) -> None:
+        """Bleak disconnect callback — invoked synchronously, cannot await.
+
+        Every client this mesh ever creates shares this one callback, so it
+        can fire for a client that is no longer ours — e.g. a late disconnect
+        from a connection attempt that failed part-way through pairing,
+        arriving after a newer attempt has succeeded. Treating that as our
+        link dropping cleared self._client without disconnecting the live
+        session, which leaked a still-connected client holding one of the
+        proxy's few connection slots and forced a pointless reconnect.
+
+        So a callback is ignored when it isn't for the current client AND the
+        current client still reports itself connected. Both conditions,
+        deliberately: HA's bluetooth layer wraps clients, so identity alone
+        could in principle mismatch on a genuine drop — but on a genuine drop
+        the current client no longer reports connected, and it is reset.
+        """
+        current = self._client
+        if (
+            current is not None
+            and client is not current
+            and getattr(current, "is_connected", False)
+        ):
+            _LOGGER.debug(
+                "Ignoring disconnect callback from a stale client on mesh %s",
+                self._mesh_name,
+            )
+            return
         if self._connected:
             _LOGGER.info("BLE connection to mesh %s dropped", self._mesh_name)
         self._reset_connection_state_sync()
@@ -649,25 +711,55 @@ class CyncMeshClient:
                 _LOGGER.error("Version callback error: %s", err)
 
     async def send_packet(
-        self, target: int, command: int, data: list[int], *, allow_reconnect: bool = True
+        self,
+        target: int,
+        command: int,
+        data: list[int],
+        *,
+        allow_reconnect: bool = True,
+        supersede: Optional[tuple[tuple[int, int], int]] = None,
     ) -> bool:
         """Encrypt and send a Telink Mesh packet to a device in the mesh.
 
         If the connection is stale, reconnects once and retries — unless
         allow_reconnect is False, in which case a write failure is just
-        reported back to the caller. That's used for passive status polling:
-        a single missed poll write (proxy hiccup, etc.) shouldn't tear down
-        an otherwise-healthy connection or trigger a reconnect. Only a real
-        BLE disconnect (via _on_disconnected) or a failed user-issued command
-        should do that.
+        reported back to the caller. That's used for passive status polling
+        and probes, which shouldn't themselves trigger a reconnect.
+
+        Whether a failure tears the session down is NOT decided per call,
+        though — see LINK_STALL_THRESHOLD. Consecutive failures are counted
+        across every caller, so a wedged link is dropped after the second
+        failed write no matter which caller made it, instead of every queued
+        command sitting out its own BLE_TIMEOUT behind the first.
+
+        supersede is (key, generation) from _send_command. If a newer command
+        for the same key has been queued by the time this one reaches the
+        link, this one is dropped without writing and reported as success:
+        the newer command carries the caller's current intent, and sending
+        the stale value first would only lengthen the queue.
         """
         attempts = 2 if allow_reconnect else 1
         for attempt in range(attempts):
+            if self._is_superseded(supersede):
+                return True
             if not self.is_connected:
                 if not allow_reconnect or not await self.connect():
                     return False
 
             async with self._write_lock:
+                # Pace writes — see WRITE_MIN_GAP. Done before the snapshot
+                # and supersede check below so both see the latest state.
+                wait = self._last_write_at + WRITE_MIN_GAP - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+
+                if self._is_superseded(supersede):
+                    _LOGGER.debug(
+                        "Dropping superseded command: target=0x%04X command=0x%02X",
+                        target, command,
+                    )
+                    return True
+
                 # Snapshot under the lock rather than reading self._client /
                 # self._sk again below — a disconnect can land between the
                 # is_connected check above and here, and we want a single
@@ -709,31 +801,87 @@ class CyncMeshClient:
                         "Packet write to target=0x%04X command=0x%02X took %.0fms",
                         target, command, (time.monotonic() - started) * 1000,
                     )
+                    self._consecutive_write_failures = 0
                     return True
                 except Exception as err:
                     _LOGGER.warning(
                         "send_packet failed (attempt %d, after %.0fms): %s",
                         attempt + 1, (time.monotonic() - started) * 1000, err,
                     )
-                    if not allow_reconnect:
-                        continue
-                    # A failed write is NOT proof the link is gone. Under proxy
-                    # congestion a plain BLE_TIMEOUT is by far the most common
-                    # cause, and tearing the session down forces a full re-pair
-                    # handshake (3 writes + 2 reads) back through the *same*
-                    # congested proxy — which usually times out too. That drops
-                    # the mesh and every device on it, so a single slow write
-                    # used to cost an outage rather than a retry.
-                    #
-                    # Only reset when bleak itself says the link is dead, or
-                    # when we're out of retries (covers the cases where the
-                    # session is wedged but still nominally connected, e.g. a
-                    # GATT error 133 or a stale service cache). Otherwise just
-                    # retry the write on the same live session.
-                    if not getattr(client, "is_connected", False) or attempt == attempts - 1:
-                        await self._reset_connection_state()
+                    await self._handle_write_failure(client)
+                finally:
+                    self._last_write_at = time.monotonic()
 
         return False
+
+    async def _handle_write_failure(self, client: Any) -> None:
+        """Decide whether a failed write means the session is gone.
+
+        A single failed write is NOT proof the link is gone — under proxy
+        congestion a plain BLE_TIMEOUT is the most common cause, and tearing
+        the session down forces a full re-pair handshake back through the
+        same congested proxy. So the first failure keeps the session.
+
+        But a failed write also leaves its ATT request outstanding in the
+        proxy (the timeout only cancels our side of it), and anything written
+        after it queues behind that request. So a second consecutive failure
+        — from any caller — means the link is wedged, and it is reset rather
+        than left to time out every queued write in turn. A link bleak itself
+        reports as dead is reset immediately.
+
+        Ignored entirely if `client` is no longer the current session: by the
+        time a slow failure lands, another caller may already have
+        reconnected, and that fresh session is not the one that failed.
+        """
+        if client is not self._client:
+            return
+        self._consecutive_write_failures += 1
+        link_dead = not getattr(client, "is_connected", False)
+        stalled = self._consecutive_write_failures >= LINK_STALL_THRESHOLD
+        if link_dead or stalled:
+            if stalled and not link_dead:
+                _LOGGER.warning(
+                    "Mesh %s: %d consecutive write failures — link is wedged, reconnecting",
+                    self._mesh_name, self._consecutive_write_failures,
+                )
+            await self._reset_connection_state()
+
+    def _is_superseded(self, supersede: Optional[tuple[tuple[int, int], int]]) -> bool:
+        if supersede is None:
+            return False
+        key, generation = supersede
+        return self._command_generation.get(key) != generation
+
+    async def _send_command(self, target: int, command: int, data: list[int]) -> bool:
+        """Send a user-issued device command, latest-wins per (target, opcode).
+
+        Adaptive Lighting and similar automations re-send brightness and
+        colour to every light on a timer. When the link is slow those updates
+        pile up behind _write_lock, and every one of them used to be written
+        in order even though only the newest matters. Now a queued command
+        that a newer one for the same device and opcode has overtaken is
+        dropped instead of written — see send_packet's supersede.
+
+        The key is the opcode, not the full payload: colour temperature and
+        RGB share CMD_COLOR, so a newer RGB supersedes an older colour
+        temperature and vice versa, which matches what the bulb ends up
+        showing either way.
+
+        Also maintains is_busy, which holds liveness probes off while user
+        commands are queued or have just finished.
+        """
+        key = (target, command)
+        generation = self._command_generation.get(key, 0) + 1
+        self._command_generation[key] = generation
+        self._pending_commands += 1
+        self._last_command_at = time.monotonic()
+        try:
+            return await self.send_packet(
+                target, command, data, supersede=(key, generation)
+            )
+        finally:
+            self._pending_commands -= 1
+            self._last_command_at = time.monotonic()
 
     async def request_status(self) -> bool:
         """Broadcast a status request so every device in the mesh reports in.
@@ -835,15 +983,15 @@ class CyncMeshClient:
     # ------------------------------------------------------------------
 
     async def set_power(self, device_id: int, on: bool) -> bool:
-        return await self.send_packet(device_id, CMD_POWER, [int(on)])
+        return await self._send_command(device_id, CMD_POWER, [int(on)])
 
     async def set_brightness(self, device_id: int, brightness: int) -> bool:
         """brightness: 0–100"""
-        return await self.send_packet(device_id, CMD_BRIGHTNESS, [brightness])
+        return await self._send_command(device_id, CMD_BRIGHTNESS, [brightness])
 
     async def set_color_temp(self, device_id: int, color_temp: int) -> bool:
         """color_temp: 0–100 (caller maps from Kelvin)"""
-        return await self.send_packet(device_id, CMD_COLOR, [CMD_COLOR_TEMP_SUBCMD, color_temp])
+        return await self._send_command(device_id, CMD_COLOR, [CMD_COLOR_TEMP_SUBCMD, color_temp])
 
     async def set_rgb(self, device_id: int, red: int, green: int, blue: int) -> bool:
-        return await self.send_packet(device_id, CMD_COLOR, [CMD_RGB_SUBCMD, red, green, blue])
+        return await self._send_command(device_id, CMD_COLOR, [CMD_RGB_SUBCMD, red, green, blue])
