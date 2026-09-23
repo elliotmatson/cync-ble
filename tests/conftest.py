@@ -111,6 +111,7 @@ def _install_stubs() -> None:
     _mod(
         "homeassistant.components.bluetooth",
         async_ble_device_from_address=lambda *a, **k: None,
+        async_last_service_info=lambda *a, **k: None,
         async_register_callback=lambda *a, **k: (lambda: None),
         BluetoothCallbackMatcher=lambda **k: None,
         BluetoothChange=types.SimpleNamespace(ADVERTISEMENT="advertisement"),
@@ -149,7 +150,7 @@ def _install_stubs() -> None:
     )
     _mod("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     _mod("homeassistant.config_entries", ConfigEntry=object,
-         ConfigFlow=_StubConfigFlow)
+         ConfigFlow=_StubConfigFlow, OptionsFlow=object)
     _mod("homeassistant.data_entry_flow", FlowResult=dict)
     _mod("homeassistant.exceptions", ConfigEntryNotReady=Exception)
     _mod("homeassistant.helpers.typing", ConfigType=dict)

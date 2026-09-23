@@ -39,15 +39,21 @@ def _keyword(call: ast.Call, name: str):
     return None
 
 
-@pytest.fixture(scope="module")
-def flow_facts(flow_ast):
+def _flow_class(flow_ast: ast.Module, name: str) -> ast.ClassDef:
+    for node in flow_ast.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in config_flow.py")
+
+
+def _facts(tree: ast.AST) -> dict:
     """Extract shown step ids, abort reasons and supplied placeholders."""
     shown: set[str] = set()
     aborts: set[str] = set()
     placeholders: dict[str, object] = {}
     uses_update_reload = False
 
-    for node in ast.walk(flow_ast):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
         name = node.func.attr
@@ -77,6 +83,18 @@ def flow_facts(flow_ast):
         "placeholders": placeholders,
         "uses_update_reload": uses_update_reload,
     }
+
+
+@pytest.fixture(scope="module")
+def flow_facts(flow_ast):
+    """Facts for the config flow only. The options flow's steps translate
+    under "options", not "config", so it is scanned separately."""
+    return _facts(_flow_class(flow_ast, "CyncBLEConfigFlow"))
+
+
+@pytest.fixture(scope="module")
+def options_facts(flow_ast):
+    return _facts(_flow_class(flow_ast, "CyncBLEOptionsFlow"))
 
 
 # --------------------------------------------------------------------------
@@ -172,6 +190,28 @@ def test_summarize_produces_no_unused_placeholders(relative):
 def test_step_data_keys_match_the_schema(relative, step_id, fields):
     steps = read_json(relative)["config"]["step"]
     assert set(steps[step_id].get("data", {})) == fields
+
+
+# --------------------------------------------------------------------------
+# Options flow <-> translations
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("relative", TRANSLATION_FILES)
+def test_options_steps_match_translations(relative, options_facts):
+    steps = read_json(relative)["options"]["step"]
+    assert set(steps) == options_facts["shown_steps"]
+
+
+@pytest.mark.parametrize("relative", TRANSLATION_FILES)
+def test_options_init_data_keys_match_the_schema(relative):
+    const = load("const")
+    steps = read_json(relative)["options"]["step"]
+    assert set(steps["init"]["data"]) == {const.CONF_WRITE_WITHOUT_RESPONSE}
+
+
+def test_en_json_options_omit_data_description_by_convention():
+    steps = read_json("translations/en.json")["options"]["step"]
+    assert [s for s, body in steps.items() if "data_description" in body] == []
 
 
 # --------------------------------------------------------------------------

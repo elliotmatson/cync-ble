@@ -333,6 +333,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         devices_config: list[dict[str, Any]],
         entry_id: Optional[str] = None,
+        write_without_response: bool = False,
     ) -> None:
         super().__init__(
             hass,
@@ -388,6 +389,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                 mesh_macs=info["macs"],
                 status_callback=self._on_device_status,
                 version_callback=self._on_device_version,
+                write_without_response=write_without_response,
             )
             for mesh_name, info in mesh_info.items()
         }
@@ -456,16 +458,18 @@ class CyncBLECoordinator(DataUpdateCoordinator):
         if mesh_name is None:
             return
         client = self._mesh_clients.get(mesh_name)
-        # client.connect() guards internally against concurrent/redundant calls
-        if client is None or client.is_connected or client.is_connecting:
+        # Skips while connected, mid-sweep, or backing off after a failed
+        # sweep — see CyncMeshClient.can_attempt_connect.
+        if client is None or not client.can_attempt_connect:
             return
-        _LOGGER.debug("BLE proxy saw Cync MAC %s — triggering targeted connect", mac)
-        # Pass the specific MAC so we only use ONE connection slot, not all 43
-        self.hass.async_create_task(self._connect_mesh(mesh_name, client, preferred_mac=mac))
+        # The advertisement is only the trigger. Which bulb to connect
+        # through is chosen by signal strength across everything heard
+        # recently (CyncMeshClient._rank_candidates), not by whichever one
+        # happened to advertise first.
+        _LOGGER.debug("BLE proxy saw Cync MAC %s — triggering reconnect sweep", mac)
+        self.hass.async_create_task(self._connect_mesh(mesh_name, client))
 
-    async def _connect_mesh(
-        self, mesh_name: str, client: CyncMeshClient, preferred_mac: Optional[str] = None
-    ) -> None:
+    async def _connect_mesh(self, mesh_name: str, client: CyncMeshClient) -> None:
         """Attempt mesh connection, gated by the global connection semaphore."""
         try:
             await asyncio.wait_for(self._connect_sem.acquire(), timeout=5)
@@ -473,7 +477,7 @@ class CyncBLECoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Connection cap reached (semaphore full), skipping mesh %s", mesh_name)
             return
         try:
-            connected = await client.connect(preferred_mac=preferred_mac)
+            connected = await client.connect()
             if connected:
                 _LOGGER.info("Connected to mesh %s via BLE proxy", mesh_name)
                 # Both reconnect paths land here now, so record the recovery
@@ -614,9 +618,10 @@ class CyncBLECoordinator(DataUpdateCoordinator):
                 # congestion it was itself creating.
                 #
                 # _connect_mesh is gated by _connect_sem so this can't flood
-                # proxy slots, and the is_connecting guard keeps successive
-                # poll cycles from stacking redundant attempts.
-                if not client.is_connecting:
+                # proxy slots, and can_attempt_connect keeps successive poll
+                # cycles from stacking redundant attempts or cutting a
+                # post-failure backoff short.
+                if client.can_attempt_connect:
                     self.hass.async_create_task(self._connect_mesh(mesh_name, client))
             else:
                 if not was_connected:

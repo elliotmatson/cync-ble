@@ -28,7 +28,10 @@ from typing import Any, Callable, Optional, Sequence
 from bleak_retry_connector import establish_connection
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    async_ble_device_from_address,
+    async_last_service_info,
+)
 
 from .const import (
     BLE_TIMEOUT,
@@ -49,13 +52,20 @@ from .const import (
     CYNC_VENDOR,
     FIRMWARE_QUERY_WINDOW,
     LINK_STALL_THRESHOLD,
+    MAC_COOLDOWN_MAX_SECONDS,
     MAC_COOLDOWN_SECONDS,
     MAC_FAIL_THRESHOLD,
     MESH_OTA_SELECTOR_READ,
     MESH_OTA_SUB_GET_VERSION,
     PROBE_TIMEOUT,
+    RECONNECT_ADVERT_MAX_AGE,
+    RECONNECT_BACKOFF_MAX,
+    RECONNECT_BACKOFF_MIN,
+    RECONNECT_CONNECT_ATTEMPTS,
     RECONNECT_GRACE_PERIOD,
+    RECONNECT_SWEEP_MAX,
     WRITE_MIN_GAP,
+    WRITE_MIN_GAP_NO_RESPONSE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -236,8 +246,12 @@ class CyncMeshClient:
         mesh_macs: list[str],
         status_callback: Optional[Callable[[DeviceStatus], Any]] = None,
         version_callback: Optional[Callable[[DeviceVersion], Any]] = None,
+        write_without_response: bool = False,
     ) -> None:
         self._hass = hass
+        # See send_packet. Only mesh control writes on 1912 use this; the
+        # pairing handshake always waits for its responses.
+        self._write_without_response = write_without_response
         # Strip colons/dashes so the AES key derivation matches what the bulb expects.
         # The Cync API returns the mesh MAC as "B3AB645F4604" (no colons), and the
         # bulb's pairing key was set using that exact string. If we normalize to
@@ -278,6 +292,11 @@ class CyncMeshClient:
         # the rest of the mesh — see _connect_to_mac / _mac_in_cooldown.
         self._mac_fail_counts: dict[str, int] = {}
         self._mac_cooldown_until: dict[str, float] = {}
+
+        # Reconnect-sweep backoff — see connect(). _next_sweep_at is the
+        # monotonic time before which a new sweep is refused outright.
+        self._sweep_backoff: float = 0.0
+        self._next_sweep_at: float = 0.0
 
         # Failed writes in a row on the current session, across every caller
         # — see LINK_STALL_THRESHOLD. Per-call retry counting can't see a
@@ -375,23 +394,49 @@ class CyncMeshClient:
             "mac_failure_counts": dict(self._mac_fail_counts),
             "pending_commands": self._pending_commands,
             "consecutive_write_failures": self._consecutive_write_failures,
+            "write_without_response": self._write_without_response,
+            "next_reconnect_in": (
+                round(self._next_sweep_at - now, 1) if self._next_sweep_at > now else 0
+            ),
             "seconds_since_disconnect": (
                 None if self._disconnected_at is None or self.is_connected
                 else round(now - self._disconnected_at, 1)
             ),
         }
 
-    async def connect(self, preferred_mac: Optional[str] = None) -> bool:
-        """Attempt to connect to a mesh MAC.
+    @property
+    def can_attempt_connect(self) -> bool:
+        """Whether a connect() call right now could start a sweep at all.
 
-        If preferred_mac is given (e.g. from a BLE advertisement callback),
-        try that one first and only that one — avoids flooding proxy slots.
-        Otherwise iterate through all known MACs.
+        Lets the coordinator's advertisement callback skip spawning a task
+        per advertisement while a sweep is running or backing off — with 44
+        bulbs advertising, that is many per second during an outage.
+        """
+        return (
+            not self.is_connected
+            and not self.is_connecting
+            and time.monotonic() >= self._next_sweep_at
+        )
 
-        Single-flighted via _connect_lock: if a connect is already in
-        progress, callers wait for it rather than bailing out immediately,
-        then reuse its result. Without this, every light command that
-        arrives while a reconnect is under way used to fail outright.
+    async def connect(self) -> bool:
+        """Run one reconnect sweep over the best candidate bulbs.
+
+        Gentle on purpose — see RECONNECT_SWEEP_MAX. Every connection attempt
+        pauses scanning on the ESPHome proxy making it, so the old sweep (every
+        known MAC in config order, three attempts of up to 20s each) could keep
+        the proxies deaf for minutes: exactly when they needed to hear an
+        advertisement to find a bulb worth connecting through. So a sweep:
+
+          * only considers bulbs a proxy has heard within
+            RECONNECT_ADVERT_MAX_AGE — a bulb nobody can hear won't connect;
+          * tries the strongest signal first, and at most RECONNECT_SWEEP_MAX;
+          * makes RECONNECT_CONNECT_ATTEMPTS attempts per bulb;
+          * backs off after failing (RECONNECT_BACKOFF_MIN, doubling to
+            RECONNECT_BACKOFF_MAX), so the proxies get time to scan between
+            sweeps. Callers during the backoff get False immediately.
+
+        Single-flighted via _connect_lock: if a sweep is already in progress,
+        callers wait for it and reuse its result rather than starting another.
         """
         if self._connected:
             return True
@@ -399,30 +444,55 @@ class CyncMeshClient:
         async with self._connect_lock:
             if self._connected:  # another caller finished while we waited
                 return True
-
-            if preferred_mac:
-                # Use the device we just saw advertising — single targeted attempt
-                mac = self._normalize_mac(preferred_mac)
-                if self._mac_in_cooldown(mac):
-                    _LOGGER.debug(
-                        "Skipping %s — in cooldown after repeated connect failures", mac
-                    )
-                    return False
-                _LOGGER.debug("Connecting to mesh '%s' via recently-seen %s", self._mesh_name, mac)
-                return await self._connect_to_mac(mac)
-            else:
-                _LOGGER.debug("Trying to connect to mesh '%s'", self._mesh_name)
-                # Try healthy MACs first so one stuck node doesn't eat the whole
-                # cycle before we ever reach a bulb that would actually connect.
-                # If every MAC is in cooldown, fall back to the full list rather
-                # than refusing to reconnect at all.
-                candidates = [m for m in self._mesh_macs if not self._mac_in_cooldown(m)]
-                if not candidates:
-                    candidates = list(self._mesh_macs)
-                for mac in candidates:
-                    if await self._connect_to_mac(mac):
-                        return True
+            if time.monotonic() < self._next_sweep_at:
                 return False
+
+            candidates = self._rank_candidates()
+            _LOGGER.debug(
+                "Reconnect sweep for mesh '%s': trying %s",
+                self._mesh_name, candidates or "nothing (no bulb heard recently)",
+            )
+            for mac in candidates:
+                if await self._connect_to_mac(mac):
+                    self._sweep_backoff = 0.0
+                    self._next_sweep_at = 0.0
+                    return True
+
+            self._sweep_backoff = min(
+                max(self._sweep_backoff * 2, RECONNECT_BACKOFF_MIN), RECONNECT_BACKOFF_MAX
+            )
+            self._next_sweep_at = time.monotonic() + self._sweep_backoff
+            return False
+
+    def _rank_candidates(self) -> list[str]:
+        """Bulbs worth a connection attempt, best first.
+
+        Only bulbs some proxy has heard within RECONNECT_ADVERT_MAX_AGE, by
+        strongest RSSI, skipping any in cooldown, capped at
+        RECONNECT_SWEEP_MAX. If every recently-heard bulb is in cooldown, the
+        single least-failed one is returned instead, so a mesh whose only
+        audible bulbs have all failed recently is still retried — slowly —
+        rather than never.
+        """
+        now = time.monotonic()
+        heard: list[tuple[int, str]] = []
+        for raw in self._mesh_macs:
+            mac = self._normalize_mac(raw)
+            info = async_last_service_info(self._hass, mac, connectable=True)
+            if info is None or now - info.time > RECONNECT_ADVERT_MAX_AGE:
+                continue
+            heard.append((info.rssi, mac))
+        heard.sort(key=lambda item: item[0], reverse=True)
+
+        ready = [mac for _, mac in heard if not self._mac_in_cooldown(mac)]
+        if ready:
+            return ready[:RECONNECT_SWEEP_MAX]
+        if heard:
+            fallback = min(
+                heard, key=lambda item: (self._mac_fail_counts.get(item[1], 0), -item[0])
+            )
+            return [fallback[1]]
+        return []
 
     def _mac_in_cooldown(self, mac: str) -> bool:
         mac = self._normalize_mac(mac)
@@ -430,14 +500,20 @@ class CyncMeshClient:
         return until is not None and time.monotonic() < until
 
     def _record_mac_failure(self, mac: str) -> None:
+        """Count a failed connect, with a cooldown that doubles on each further
+        consecutive failure (see MAC_COOLDOWN_MAX_SECONDS)."""
         mac = self._normalize_mac(mac)
         count = self._mac_fail_counts.get(mac, 0) + 1
         self._mac_fail_counts[mac] = count
         if count >= MAC_FAIL_THRESHOLD:
-            self._mac_cooldown_until[mac] = time.monotonic() + MAC_COOLDOWN_SECONDS
+            cooldown = min(
+                MAC_COOLDOWN_SECONDS * 2 ** (count - MAC_FAIL_THRESHOLD),
+                MAC_COOLDOWN_MAX_SECONDS,
+            )
+            self._mac_cooldown_until[mac] = time.monotonic() + cooldown
             _LOGGER.debug(
                 "MAC %s failed %d times in a row — cooling down for %ds",
-                mac, count, MAC_COOLDOWN_SECONDS,
+                mac, count, cooldown,
             )
 
     def _record_mac_success(self, mac: str) -> None:
@@ -473,7 +549,7 @@ class CyncMeshClient:
                 BleakClient,
                 ble_device,
                 mac,
-                max_attempts=3,
+                max_attempts=RECONNECT_CONNECT_ATTEMPTS,
                 disconnected_callback=self._on_disconnected,
                 use_services_cache=use_cache,
             )
@@ -749,7 +825,8 @@ class CyncMeshClient:
             async with self._write_lock:
                 # Pace writes — see WRITE_MIN_GAP. Done before the snapshot
                 # and supersede check below so both see the latest state.
-                wait = self._last_write_at + WRITE_MIN_GAP - time.monotonic()
+                gap = WRITE_MIN_GAP_NO_RESPONSE if self._write_without_response else WRITE_MIN_GAP
+                wait = self._last_write_at + gap - time.monotonic()
                 if wait > 0:
                     await asyncio.sleep(wait)
 
@@ -788,7 +865,18 @@ class CyncMeshClient:
                 )
                 started = time.monotonic()
                 try:
-                    await _write_gatt(client, CYNC_CONTROL_CHAR, bytes(enc))
+                    # response=False is the Telink-recommended mode for
+                    # control commands (Android SDK manual AN-17071702-E1, "Light device control":
+                    # "sendCommandNoResponse ... recommended"). response=True
+                    # is set explicitly for the default rather than left to
+                    # bleak's auto-selection, so the mode in use is the one
+                    # the option says. See CONF_WRITE_WITHOUT_RESPONSE for
+                    # what switching it off costs: without an ATT response a
+                    # wedged link no longer shows up as a write timeout.
+                    await _write_gatt(
+                        client, CYNC_CONTROL_CHAR, bytes(enc),
+                        response=not self._write_without_response,
+                    )
                     # Elapsed time is the useful half of this line. Each
                     # high-level action can be several sequential writes (a
                     # light turn-on with brightness and colour is three), and

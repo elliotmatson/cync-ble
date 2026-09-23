@@ -95,6 +95,9 @@ CONF_USER_ID: Final = "user_id"
 # Reconfigure form field — opt in to dropping devices the cloud no longer
 # lists. Defaults off; see device_sync.apply_diff for why.
 CONF_REMOVE_MISSING: Final = "remove_missing"
+# Options flow — send mesh control commands as GATT write-without-response.
+# Off by default; see WRITE_MIN_GAP_NO_RESPONSE and CyncMeshClient.send_packet.
+CONF_WRITE_WITHOUT_RESPONSE: Final = "write_without_response"
 
 # Repairs issue raised when the mesh reports status from a device that isn't
 # in the config entry — i.e. one paired in the Cync app after setup. The
@@ -149,6 +152,13 @@ LINK_STALL_THRESHOLD: Final = 2
 # invisible on a single command; mostly matters for bursts.
 WRITE_MIN_GAP: Final = 0.05
 
+# Spacing used instead when commands go out as write-without-response. With
+# no ATT acknowledgement nothing else paces the writes — the proxy accepts
+# them as fast as they are handed over — so the gap is the only throttle on
+# how fast the connected bulb is asked to re-broadcast. Unverified against
+# hardware: a starting point to tune, not a measured limit.
+WRITE_MIN_GAP_NO_RESPONSE: Final = 0.1
+
 # Liveness probes (see CyncBLEDevice.probe_if_quiet) are held off while any
 # light/switch/fan command is queued or has finished within this many
 # seconds. Probes are diagnostic and share the single GATT link with user
@@ -166,6 +176,24 @@ MAX_CONCURRENT_CONNECTIONS: Final = 3
 # to the rest of the mesh.
 MAC_FAIL_THRESHOLD: Final = 2
 MAC_COOLDOWN_SECONDS: Final = 120
+# Each further consecutive failure doubles the cooldown, up to this cap. On
+# the real mesh a handful of bulbs failed 7-13 times in a morning and every
+# reconnect sweep still spent up to a minute on each of them.
+MAC_COOLDOWN_MAX_SECONDS: Final = 900
+
+# Reconnect sweeps (CyncMeshClient.connect). Every connection attempt pauses
+# scanning on the ESPHome proxy making it, so a sweep that works through all
+# 44 bulbs x 3 attempts x 20s blinds the proxies for minutes — exactly when
+# they need to hear advertisements to find a bulb to reconnect through.
+#
+# A sweep now tries only bulbs a proxy has heard recently, strongest signal
+# first, a few at a time, one attempt each; and a failed sweep backs off
+# before the next one so the proxies get time to scan in between.
+RECONNECT_ADVERT_MAX_AGE: Final = 120
+RECONNECT_SWEEP_MAX: Final = 3
+RECONNECT_CONNECT_ATTEMPTS: Final = 1
+RECONNECT_BACKOFF_MIN: Final = 5
+RECONNECT_BACKOFF_MAX: Final = 60
 
 # A mesh disconnect this brief or shorter doesn't flip devices unavailable —
 # see CyncMeshClient.recently_disconnected. The fast BLE-advertisement-

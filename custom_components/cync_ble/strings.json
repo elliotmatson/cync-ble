@@ -65,6 +65,20 @@
       "cannot_connect": "Failed to connect to Cync cloud. Your device list was left unchanged."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Connection tuning",
+        "description": "Experimental. Leave off unless mesh disconnects persist.\n\nWhen on, light, switch and fan commands are sent without waiting for the bulb to acknowledge each write, which is the mode Telink recommends for control commands. The trade-off: a stuck connection no longer shows up as a write timeout, so if lights stop responding while the mesh still reports connected, turn this back off. Saving reloads the integration.",
+        "data": {
+          "write_without_response": "Send commands without waiting for acknowledgement"
+        },
+        "data_description": {
+          "write_without_response": "Off by default. Telink's recommended mode for control commands, but not yet verified on Cync bulbs behind ESPHome proxies."
+        }
+      }
+    }
+  },
   "entity": {
     "light": {
       "cync_ble": {
