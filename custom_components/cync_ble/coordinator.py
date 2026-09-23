@@ -237,6 +237,11 @@ class CyncBLEDevice:
         """
         if not self._mesh_client.is_connected or self.last_seen is None:
             return
+        # Defer to user commands sharing the link (see COMMAND_QUIET_PERIOD).
+        # Checked before _last_probe_attempt is stamped, so a deferred probe
+        # runs on the first idle cycle rather than waiting out PROBE_INTERVAL.
+        if self._mesh_client.is_busy:
+            return
         now = time.monotonic()
         if now - self.last_seen < PROBE_QUIET_THRESHOLD:
             return
