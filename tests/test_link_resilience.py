@@ -14,6 +14,7 @@ locking, counting and reset behaviour rather than a mock of it.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from conftest import load
@@ -322,7 +323,9 @@ def test_probe_is_deferred_while_busy_and_runs_once_idle():
     device = coordinator_mod.CyncBLEDevice(
         {"device_id": 5, "name": "Lamp", "mesh_name": "112233445566"}, mesh,
     )
-    device.last_seen = 0.0  # long quiet — due for a probe
+    # Relative, not 0.0: monotonic() counts from boot, and on a freshly
+    # started CI runner that can be under PROBE_QUIET_THRESHOLD.
+    device.last_seen = time.monotonic() - const.PROBE_QUIET_THRESHOLD - 1
 
     asyncio.run(device.probe_if_quiet())
     assert mesh.probes == 0
