@@ -12,6 +12,9 @@ paired in the Cync app after setup:
   reconfigure_otp     → OTP, then continue
   reconfigure_confirm → show the diff, apply on submit
 
+Options (CyncBLEOptionsFlow) hold runtime tuning that needs no cloud access —
+currently only the mesh write mode.
+
 The diff/merge itself lives in device_sync.py, deliberately free of any HA
 imports so it can be reasoned about and tested on its own.
 """
@@ -20,6 +23,7 @@ from typing import Any, Optional
 
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
@@ -29,6 +33,7 @@ from .const import (
     CONF_REMOVE_MISSING,
     CONF_SESSION_TOKEN,
     CONF_USER_ID,
+    CONF_WRITE_WITHOUT_RESPONSE,
     DOMAIN,
 )
 from .cync_cloud import CyncCloudClient
@@ -338,4 +343,43 @@ class CyncBLEConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reconfigure_confirm",
             data_schema=STEP_RECONFIGURE_CONFIRM_SCHEMA,
             description_placeholders=summarize(diff),
+        )
+
+    # ------------------------------------------------------------------
+    # Options
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> "CyncBLEOptionsFlow":
+        return CyncBLEOptionsFlow(config_entry)
+
+
+class CyncBLEOptionsFlow(config_entries.OptionsFlow):
+    """Runtime tuning that doesn't need the cloud: currently the write mode.
+
+    Saving reloads the entry (see _async_options_updated in __init__.py),
+    because the write mode is fixed when the mesh clients are built.
+    """
+
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        # Stored under our own name rather than as `config_entry`, which
+        # newer Home Assistant versions provide themselves and warn about
+        # being assigned.
+        self._entry = entry
+
+    async def async_step_init(
+        self, user_input: Optional[dict[str, Any]] = None
+    ) -> FlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self._entry.options.get(CONF_WRITE_WITHOUT_RESPONSE, False)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {vol.Optional(CONF_WRITE_WITHOUT_RESPONSE, default=current): bool}
+            ),
         )

@@ -11,6 +11,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_DEVICES,
+    CONF_WRITE_WITHOUT_RESPONSE,
     DOMAIN,
     FIRMWARE_QUERY_WINDOW,
     FIRMWARE_QUERY_WINDOW_MAX,
@@ -117,7 +118,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyncBLEConfigEntry) -> b
         return False
 
     try:
-        coordinator = CyncBLECoordinator(hass, devices_config, entry_id=entry.entry_id)
+        coordinator = CyncBLECoordinator(
+            hass,
+            devices_config,
+            entry_id=entry.entry_id,
+            write_without_response=entry.options.get(CONF_WRITE_WITHOUT_RESPONSE, False),
+        )
         entry.runtime_data = coordinator
         await coordinator.async_refresh()
     except Exception as err:
@@ -131,8 +137,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyncBLEConfigEntry) -> b
     entry.async_on_unload(
         hass.bus.async_listen_once("homeassistant_stop", coordinator.async_shutdown)
     )
+    # The write mode is fixed when the mesh clients are built, so changing it
+    # in the options flow takes effect through a reload.
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     return True
+
+
+async def _async_options_updated(hass: HomeAssistant, entry: CyncBLEConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: CyncBLEConfigEntry) -> bool:
