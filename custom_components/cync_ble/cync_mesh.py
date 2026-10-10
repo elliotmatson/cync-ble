@@ -46,6 +46,7 @@ from .const import (
     CMD_STATUS_QUERY_RESPONSE,
     CMD_STATUS_RESPONSE,
     COMMAND_QUIET_PERIOD,
+    COOLDOWN_BYPASS_AFTER,
     CYNC_CONTROL_CHAR,
     CYNC_NOTIFY_CHAR,
     CYNC_PAIRING_CHAR,
@@ -58,6 +59,8 @@ from .const import (
     MESH_OTA_SELECTOR_READ,
     MESH_OTA_SUB_GET_VERSION,
     PROBE_TIMEOUT,
+    PROXY_REFUSAL_MAX_SECONDS,
+    RECENT_GOOD_MAX,
     RECONNECT_ADVERT_MAX_AGE,
     RECONNECT_BACKOFF_MAX,
     RECONNECT_BACKOFF_MIN,
@@ -297,6 +300,18 @@ class CyncMeshClient:
         # monotonic time before which a new sweep is refused outright.
         self._sweep_backoff: float = 0.0
         self._next_sweep_at: float = 0.0
+        # Bulbs that most recently carried the mesh, newest first — tried
+        # ahead of others on reconnect (see _rank_candidates).
+        self._recent_good_macs: list[str] = []
+        # Proxy-side refusals per bulb this outage (see _is_proxy_refusal).
+        # Not a penalty — they never bench a bulb — but they do push it back
+        # in the sweep order, so a few instantly-refusing bulbs can't hold
+        # the front of every sweep and starve the rest.
+        self._mac_refusals: dict[str, int] = {}
+        # Start of the outage before the first connect, so the
+        # COOLDOWN_BYPASS_AFTER clock also runs at startup, when
+        # _disconnected_at is still None.
+        self._created_at: float = time.monotonic()
 
         # Failed writes in a row on the current session, across every caller
         # — see LINK_STALL_THRESHOLD. Per-call retry counting can't see a
@@ -395,6 +410,8 @@ class CyncMeshClient:
             "pending_commands": self._pending_commands,
             "consecutive_write_failures": self._consecutive_write_failures,
             "write_without_response": self._write_without_response,
+            "recent_good_macs": list(self._recent_good_macs),
+            "mac_refusal_counts": dict(self._mac_refusals),
             "next_reconnect_in": (
                 round(self._next_sweep_at - now, 1) if self._next_sweep_at > now else 0
             ),
@@ -464,15 +481,31 @@ class CyncMeshClient:
             self._next_sweep_at = time.monotonic() + self._sweep_backoff
             return False
 
+    def _outage_seconds(self) -> float:
+        """How long the mesh has been without a connection."""
+        if self.is_connected:
+            return 0.0
+        start = self._disconnected_at if self._disconnected_at is not None else self._created_at
+        return time.monotonic() - start
+
     def _rank_candidates(self) -> list[str]:
         """Bulbs worth a connection attempt, best first.
 
-        Only bulbs some proxy has heard within RECONNECT_ADVERT_MAX_AGE, by
-        strongest RSSI, skipping any in cooldown, capped at
-        RECONNECT_SWEEP_MAX. If every recently-heard bulb is in cooldown, the
-        single least-failed one is returned instead, so a mesh whose only
-        audible bulbs have all failed recently is still retried — slowly —
-        rather than never.
+        Only bulbs some proxy has heard within RECONNECT_ADVERT_MAX_AGE are
+        considered, capped at RECONNECT_SWEEP_MAX per sweep.
+
+        Bulbs are ordered by how many times they have been tried and failed
+        or been refused during this outage, then recently-successful first
+        (see _recent_good_macs), then strongest signal. So the first sweep
+        leads with the bulb that last carried the mesh, and later sweeps
+        rotate onto bulbs not yet tried instead of re-trying the same few.
+
+        Early in an outage, bulbs in cooldown are skipped. Once the mesh has
+        been down COOLDOWN_BYPASS_AFTER — or if every heard bulb is cooling
+        down — cooldowns are ignored. In 1.2.0 a single fallback bulb was
+        retried here while every other bulb sat out a cooldown of up to 15
+        minutes, which is what stretched outages to 7-14 minutes once nearly
+        every bulb had been penalised.
         """
         now = time.monotonic()
         heard: list[tuple[int, str]] = []
@@ -482,17 +515,25 @@ class CyncMeshClient:
             if info is None or now - info.time > RECONNECT_ADVERT_MAX_AGE:
                 continue
             heard.append((info.rssi, mac))
-        heard.sort(key=lambda item: item[0], reverse=True)
 
-        ready = [mac for _, mac in heard if not self._mac_in_cooldown(mac)]
-        if ready:
-            return ready[:RECONNECT_SWEEP_MAX]
-        if heard:
-            fallback = min(
-                heard, key=lambda item: (self._mac_fail_counts.get(item[1], 0), -item[0])
-            )
-            return [fallback[1]]
-        return []
+        def tries(mac: str) -> int:
+            return self._mac_fail_counts.get(mac, 0) + self._mac_refusals.get(mac, 0)
+
+        def recency(mac: str) -> int:
+            try:
+                return self._recent_good_macs.index(mac)
+            except ValueError:
+                return len(self._recent_good_macs)
+
+        bypass = self._outage_seconds() >= COOLDOWN_BYPASS_AFTER
+        if not bypass:
+            ready = [(rssi, mac) for rssi, mac in heard if not self._mac_in_cooldown(mac)]
+            if ready:
+                ready.sort(key=lambda item: (tries(item[1]), recency(item[1]), -item[0]))
+                return [mac for _, mac in ready[:RECONNECT_SWEEP_MAX]]
+
+        heard.sort(key=lambda item: (tries(item[1]), recency(item[1]), -item[0]))
+        return [mac for _, mac in heard[:RECONNECT_SWEEP_MAX]]
 
     def _mac_in_cooldown(self, mac: str) -> bool:
         mac = self._normalize_mac(mac)
@@ -517,9 +558,32 @@ class CyncMeshClient:
             )
 
     def _record_mac_success(self, mac: str) -> None:
+        """A bulb carried the mesh: forget every bulb's failures.
+
+        Failure counts describe the outage that just ended, not the bulbs. In
+        1.2.0 only the bulb that connected was cleared, so every other bulb
+        kept accumulating failures across outages (20-39 each within a day
+        on the real mesh) and sat permanently at the maximum cooldown.
+        """
         mac = self._normalize_mac(mac)
-        self._mac_fail_counts.pop(mac, None)
-        self._mac_cooldown_until.pop(mac, None)
+        self._mac_fail_counts.clear()
+        self._mac_cooldown_until.clear()
+        self._mac_refusals.clear()
+        if mac in self._recent_good_macs:
+            self._recent_good_macs.remove(mac)
+        self._recent_good_macs.insert(0, mac)
+        del self._recent_good_macs[RECENT_GOOD_MAX:]
+
+    @staticmethod
+    def _is_proxy_refusal(err: BaseException, elapsed: float) -> bool:
+        """Whether a failed connect was refused by the proxy itself.
+
+        Such a failure says nothing about the bulb, so it isn't counted
+        toward the bulb's cooldown — see PROXY_REFUSAL_MAX_SECONDS.
+        """
+        if "connection slot" in str(err) or type(err).__name__ == "BleakOutOfConnectionSlotsError":
+            return True
+        return elapsed < PROXY_REFUSAL_MAX_SECONDS
 
     @staticmethod
     def _normalize_mac(mac: str) -> str:
@@ -532,6 +596,10 @@ class CyncMeshClient:
     async def _connect_to_mac(self, mac: str) -> bool:
         """Connect to a specific MAC and perform Telink Mesh pairing."""
         mac = self._normalize_mac(mac)
+        started = time.monotonic()
+        # Set once a link exists: a failure after that point (pairing,
+        # notify setup) is about the bulb however quickly it happens.
+        linked = False
         try:
             ble_device = async_ble_device_from_address(self._hass, mac, connectable=True)
             if ble_device is None:
@@ -556,6 +624,7 @@ class CyncMeshClient:
             if not client.is_connected:
                 self._record_mac_failure(mac)
                 return False
+            linked = True
 
             self._client = client
             self._current_mac = mac
@@ -612,7 +681,11 @@ class CyncMeshClient:
 
         except Exception as err:
             _LOGGER.warning("Failed to connect to %s: %s", mac, err)
-            self._record_mac_failure(mac)
+            if not linked and self._is_proxy_refusal(err, time.monotonic() - started):
+                _LOGGER.debug("Not counting %s against %s: refused by the proxy", err, mac)
+                self._mac_refusals[mac] = self._mac_refusals.get(mac, 0) + 1
+            else:
+                self._record_mac_failure(mac)
             await self._reset_connection_state()
             return False
 

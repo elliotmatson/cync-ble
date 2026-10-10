@@ -14,6 +14,7 @@ async_last_service_info, which these tests replace with a table.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 import types
 
@@ -104,7 +105,9 @@ def test_bulbs_in_cooldown_are_skipped(heard):
     assert client._rank_candidates() == [MACS[1]]
 
 
-def test_when_every_heard_bulb_is_cooling_down_the_least_failed_is_retried(heard):
+def test_when_every_heard_bulb_is_cooling_down_the_least_failed_come_first(heard):
+    """No bulb is ready: cooldowns are ignored and the least-failed lead,
+    so the sweep still tries several bulbs rather than one fallback."""
     heard[MACS[0]] = (-40, 5)
     heard[MACS[1]] = (-70, 5)
     client = make_client()
@@ -113,11 +116,146 @@ def test_when_every_heard_bulb_is_cooling_down_the_least_failed_is_retried(heard
     for _ in range(const.MAC_FAIL_THRESHOLD):
         client._record_mac_failure(MACS[1])
 
-    assert client._rank_candidates() == [MACS[1]]
+    assert client._rank_candidates() == [MACS[1], MACS[0]]
 
 
 def test_nothing_heard_means_no_candidates(heard):
     assert make_client()._rank_candidates() == []
+
+
+def _long_outage(client):
+    client._disconnected_at = time.monotonic() - const.COOLDOWN_BYPASS_AFTER - 1
+
+
+def test_long_outage_ignores_cooldowns_and_rotates_onto_untried_bulbs(heard):
+    """The Oct 9-10 failure mode: nearly every audible bulb is cooling down.
+    Past COOLDOWN_BYPASS_AFTER the sweep must try bulbs anyway, least-failed
+    first, rather than wait minutes for cooldowns to expire."""
+    for i, mac in enumerate(MACS[:5]):
+        heard[mac] = (-40 - i, 5)
+    client = make_client()
+    for mac in MACS[:3]:  # the three strongest already failed this outage
+        for _ in range(const.MAC_FAIL_THRESHOLD):
+            client._record_mac_failure(mac)
+    _long_outage(client)
+
+    assert client._rank_candidates() == [MACS[3], MACS[4], MACS[0]]
+
+
+def test_short_outage_still_honours_cooldowns(heard):
+    heard[MACS[0]] = (-40, 5)
+    heard[MACS[1]] = (-80, 5)
+    client = make_client()
+    for _ in range(const.MAC_FAIL_THRESHOLD):
+        client._record_mac_failure(MACS[0])
+    client._disconnected_at = time.monotonic()  # just dropped
+
+    assert client._rank_candidates() == [MACS[1]]
+
+
+def test_instantly_refusing_bulbs_drift_back_without_being_benched(heard):
+    """Refusals never bench a bulb, but the next sweep moves on to bulbs it
+    hasn't tried, so three refusing bulbs can't starve the other 41."""
+    for i, mac in enumerate(MACS[:5]):
+        heard[mac] = (-40 - i, 5)
+    client = make_client()
+    for mac in MACS[:3]:
+        client._mac_refusals[mac] = 1
+
+    assert client._rank_candidates() == [MACS[3], MACS[4], MACS[0]]
+    assert not any(client._mac_in_cooldown(mac) for mac in MACS[:3])
+
+
+def test_recently_good_bulbs_are_tried_first(heard):
+    heard[MACS[0]] = (-40, 5)   # strongest
+    heard[MACS[1]] = (-85, 5)   # weak, but carried the mesh last
+    heard[MACS[2]] = (-60, 5)
+    client = make_client()
+    client._record_mac_success(MACS[2])
+    client._record_mac_success(MACS[1])
+
+    assert client._rank_candidates() == [MACS[1], MACS[2], MACS[0]]
+
+
+def test_recent_good_list_is_bounded_and_deduplicated():
+    client = make_client()
+    for mac in MACS[:5] + [MACS[1]]:
+        client._record_mac_success(mac)
+
+    assert client._recent_good_macs == [MACS[1], MACS[4], MACS[3]][: const.RECENT_GOOD_MAX]
+    assert client.debug_state()["recent_good_macs"] == client._recent_good_macs
+
+
+def test_any_successful_connect_clears_every_bulbs_failures():
+    """1.2.0 only cleared the bulb that connected, so the rest piled up
+    failures across outages and lived at the maximum cooldown."""
+    client = make_client()
+    for mac in MACS[:4]:
+        for _ in range(6):
+            client._record_mac_failure(mac)
+        client._mac_refusals[mac] = 3
+    client._record_mac_success(MACS[5])
+
+    assert client._mac_fail_counts == {}
+    assert client._mac_refusals == {}
+    assert not any(client._mac_in_cooldown(mac) for mac in MACS)
+
+
+@pytest.mark.parametrize(
+    ("err", "elapsed", "refusal"),
+    [
+        (Exception("Error 128 while connecting: Application error"), 0.15, True),
+        (Exception("No backend with an available connection slot that can reach address"), 9.0, True),
+        (Exception("ESP_GATT_ERROR while connecting: Interference/range"), 1.05, False),
+        (Exception("Timeout waiting for connect response after 20.0s"), 20.0, False),
+    ],
+)
+def test_proxy_refusals_are_told_apart_from_bulb_failures(err, elapsed, refusal):
+    assert cm.CyncMeshClient._is_proxy_refusal(err, elapsed) is refusal
+
+
+def test_fast_proxy_refusal_does_not_count_against_the_bulb(monkeypatch):
+    """Drives the real _connect_to_mac: an instant refusal from the proxy
+    leaves the bulb's failure count untouched; a slow failure counts."""
+    client = make_client()
+    # _connect_to_mac imports BleakClient lazily; bleak isn't a test dependency.
+    monkeypatch.setitem(sys.modules, "bleak", types.SimpleNamespace(BleakClient=object))
+    monkeypatch.setattr(cm, "async_ble_device_from_address", lambda *a, **k: object())
+    attempts = []
+
+    async def refuse(*args, **kwargs):
+        attempts.append(1)
+        raise Exception("Error 128 while connecting: Application error")
+
+    monkeypatch.setattr(cm, "establish_connection", refuse)
+    assert asyncio.run(client._connect_to_mac(MACS[0])) is False
+    assert attempts == [1]  # really reached the connect, not an import error
+    assert client._mac_fail_counts.get(MACS[0], 0) == 0
+    assert client._mac_refusals == {MACS[0]: 1}
+
+    # A quick failure after the link is up (here: pairing) is the bulb's.
+    class LinkedClient:
+        is_connected = True
+
+        async def write_gatt_char(self, *a, **k):
+            raise Exception("Bluetooth GATT Error error=133")
+
+        async def disconnect(self):
+            pass
+
+    async def link(*args, **kwargs):
+        return LinkedClient()
+
+    monkeypatch.setattr(cm, "establish_connection", link)
+    assert asyncio.run(client._connect_to_mac(MACS[1])) is False
+    assert client._mac_fail_counts.get(MACS[1], 0) == 1
+    assert MACS[1] not in client._mac_refusals
+
+    monkeypatch.setattr(cm, "establish_connection", refuse)
+    # Same refusal error, but slower than the refusal window: now it counts.
+    monkeypatch.setattr(cm, "PROXY_REFUSAL_MAX_SECONDS", 0)
+    assert asyncio.run(client._connect_to_mac(MACS[0])) is False
+    assert client._mac_fail_counts.get(MACS[0], 0) == 1
 
 
 # --------------------------------------------------------------------------
@@ -138,7 +276,8 @@ def test_cooldown_doubles_with_each_further_failure_up_to_the_cap():
             seen.append(round(_cooldown(client, mac)))
 
     base = const.MAC_COOLDOWN_SECONDS
-    assert seen[:3] == [base, base * 2, base * 4]
+    expected = [min(base * 2 ** i, const.MAC_COOLDOWN_MAX_SECONDS) for i in range(3)]
+    assert seen[:3] == expected
     assert max(seen) == const.MAC_COOLDOWN_MAX_SECONDS
 
 

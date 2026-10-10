@@ -176,10 +176,29 @@ MAX_CONCURRENT_CONNECTIONS: Final = 3
 # to the rest of the mesh.
 MAC_FAIL_THRESHOLD: Final = 2
 MAC_COOLDOWN_SECONDS: Final = 120
-# Each further consecutive failure doubles the cooldown, up to this cap. On
-# the real mesh a handful of bulbs failed 7-13 times in a morning and every
-# reconnect sweep still spent up to a minute on each of them.
-MAC_COOLDOWN_MAX_SECONDS: Final = 900
+# Each further consecutive failure doubles the cooldown, up to this cap.
+# Was 900 in 1.2.0. Failure counts then only reset when that same bulb
+# connected, so over a day nearly every bulb sat at the 15-minute cap and
+# outages lasted until cooldowns expired (7-14 min, from Oct 9). Counts now
+# reset on any successful connect (see CyncMeshClient._connect_to_mac), and
+# the cap is short enough that a bench can't outlast a normal outage.
+MAC_COOLDOWN_MAX_SECONDS: Final = 300
+
+# Once the mesh has been down this long, a reconnect sweep stops honouring
+# per-bulb cooldowns and instead tries the least-failed bulbs first. Sweeps
+# are already spaced by RECONNECT_BACKOFF_*; past this point an outage is
+# costing more than the extra connection attempts would.
+COOLDOWN_BYPASS_AFTER: Final = 60
+
+# A connect attempt that fails within this many seconds never got far enough
+# to say anything about the bulb — the proxy refused it locally (the
+# "Error 128" that returns in ~150ms, or no free connection slot). Those
+# failures are not counted against the bulb's cooldown. Radio-level failures
+# (ESP_GATT_ERROR "Interference/range", ~1.05s) and 20s timeouts still are.
+PROXY_REFUSAL_MAX_SECONDS: Final = 1.0
+
+# How many recently successful bulbs to remember and try first on reconnect.
+RECENT_GOOD_MAX: Final = 3
 
 # Reconnect sweeps (CyncMeshClient.connect). Every connection attempt pauses
 # scanning on the ESPHome proxy making it, so a sweep that works through all
